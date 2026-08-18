@@ -82,22 +82,20 @@ function getTypeDBFromNumberCode(code){
 var DataStorage={
 	/**
 	 * Создать Хранилище и перейти к настройке полей данных в ней  
-	 * 1arg: максимум записей в Хранилище вообще  
 	 * 2arg: на сколько записей выделить память сразу
 	 * 3arg: объект с настройками Хранилища
 	 * Свойства для объекта настроек:
 	 * * littleEndian: boolean - порядок записи байт
 	 * * numberOutRange: string - что делать если number выходит за рамки выбранного типа. При "toRange" - привести к диапазону, при "error" - выброс ошибки
 	 * * stringEncoding: string - кодировка строк в Хранилище. Допустимо "UTF-16"
-	 * @param {number} maxRecords 
+	 * * recordsCountForAdditionInReallocation: number
 	 * @param {number} allocatedRecords 
 	 * @param {DBCreationObjectSettings} [objectSettings] 
 	 * @returns {DB_creating}
 	 */
-	create(maxRecords, allocatedRecords, objectSettings){
-		if(!(maxRecords>0) || (maxRecords===Infinity)) throw Error("maxRecords must be positive integer");
-		if(!(allocatedRecords>0) || (allocatedRecords===Infinity)) throw Error("allocatedRecords must be positive integer")
-		return new DB_creating(maxRecords, allocatedRecords, objectSettings);
+	create(allocatedRecords, objectSettings){
+		if(!checkValueIsPositiveInteger(allocatedRecords)) throw Error("[DataStorage][create] arg 'allocatedRecords' must be positive integer");
+		return new DB_creating(allocatedRecords, objectSettings);
 	},
 	/**
 	 * @typedef {Object} DBSettingsToFromBuffer
@@ -166,6 +164,12 @@ var DataStorage={
 					if(checking!=="success") throw Error("[DataStorage][createFrom] defaultValue no valid for field type");
 				}
 			}
+			if(Object.hasOwn(objectSettings.modifications, "deleteFields")){
+				if(!Array.isArray(objectSettings.modifications.deleteFields)) throw Error("[DataStorage][createFrom] 'deleteFields' must be array")
+			}
+			if(Object.hasOwn(objectSettings.modifications, "deleteRecords")){
+				if(!Array.isArray(objectSettings.modifications.deleteRecords)) throw Error("[DataStorage][createFrom] 'deleteRecords' must be array")
+			}
 		}
 		for(var i=0; i<object.fields.length; ++i){
 			var field=object.fields[i];
@@ -175,8 +179,8 @@ var DataStorage={
 			}
 		}
 		return new DB_filling({
+			recordsCountForAdditionInReallocation:object.recordsCountForAdditionInReallocation,
 			currentRecords:object.currentRecords,
-			maxRecords:object.maxRecords,
 			allocatedRecords:object.allocatedRecords,
 			byteSizeOneRecord:object.byteSizeOneRecord,
 			indexLastFieldUniqueValues:indexLastFieldUniqueValues,
@@ -193,11 +197,11 @@ var DataStorage={
 	}
 }
 class DB_creating{
+	#recordsCountForAdditionInReallocation=0;
 	/** @type {ObjectDBFields} */
 	#objectFields={};
 	/** @type {ArrayDBFields} */
 	#arrayFields=[];
-	#maxRecords=0;
 	#allocatedRecords=0;
 	#offset=0;
 	#byteSizeOneRecord=0;
@@ -214,15 +218,15 @@ class DB_creating{
 	 *   littleEndian:boolean,
 	 *   numberOutRange: DBSettingNumberToRange
 	 *   stringEncoding: DBStringEncodingTypes
+	 *   recordsCountForAdditionInReallocation:number
 	 * }} DBCreationObjectSettings
 	 */
 	/**
-	 * @param {number} maxRecords
 	 * @param {number} allocatedRecords 
 	 * @param {DBCreationObjectSettings} [objectSettings]
 	 */
-	constructor(maxRecords, allocatedRecords, objectSettings){
-		this.#maxRecords=maxRecords;
+	constructor(allocatedRecords, objectSettings){
+		this.#recordsCountForAdditionInReallocation=objectSettings.recordsCountForAdditionInReallocation||0;
 		this.#allocatedRecords=allocatedRecords;
 		if(objectSettings && typeof objectSettings==="object"){
 			this.#littleEndian=!!objectSettings.littleEndian;
@@ -233,7 +237,7 @@ class DB_creating{
 					case "toRange":
 						this.#numberOutRange=objectSettings.numberOutRange;
 						break;
-					default: throw Error("numberOutRange setting can be only strings: 'error' or 'toRange'");
+					default: throw Error("param 'numberOutRange' setting can be only strings: 'error' or 'toRange'");
 				}
 			}
 			if(Object.hasOwn(objectSettings, "stringEncoding")){
@@ -242,8 +246,11 @@ class DB_creating{
 					case "UTF-16":
 						this.#stringEncoding=objectSettings.stringEncoding;
 						break;
-					default: throw Error("stringEncoding setting can be only strings: 'UTF-16'");
+					default: throw Error("param 'stringEncoding' setting can be only strings: 'UTF-16'");
 				}
+			}
+			if(Object.hasOwn(objectSettings, "recordsCountForAdditionInReallocation")){
+				if(!checkValueIsPositiveInteger(objectSettings.recordsCountForAdditionInReallocation)) throw Error("param 'recordsCountForAdditionInReallocation' must be positive integer")
 			}
 		}
 	}
@@ -270,17 +277,15 @@ class DB_creating{
 	 */
 	addFieldAnyValues(name, type, defaultValue){
 		var byteSize=getByteSizeFieldByType(type);
+		if(byteSize===0) throw Error("Type no valid");
 		if(Object.hasOwn(this.#objectFields,name)) throw Error(`[addFieldAnyValues] Field ${name} already has in DB`);
 		/** @type {DBField} */
-		var objectField={name, type, offset:this.#offset, isFieldUniqueValues:false, defaultValue:{value:defaultValue?.toString(), to:typeof defaultValue}};
+		var objectField=createFieldAnyValues(name, type, defaultValue);
 		if(defaultValue!=undefined){
 			var checking=checkValueToPutInField(objectField, defaultValue, this.#numberOutRange);
 			if(checking!=="success") throw Error("[addFieldAnyValues] "+checking);
-		} else {
-			var value=getDefaultValueByType(objectField.type);
-			objectField.defaultValue.value=value.toString();
-			objectField.defaultValue.to=typeof value;
 		}
+		objectField.offset=this.#offset;
 		this.#arrayFields.push(objectField);
 		this.#objectFields[name]=objectField;
 		this.#offset+=byteSize;
@@ -302,7 +307,6 @@ class DB_creating{
 	endCreation(){
 		if(typeof this.#callbackAllocation!=="function") throw Error("[endCreation] CallbackAllocation must be setted");
 		return new DB_filling({
-			maxRecords:this.#maxRecords,
 			allocatedRecords:this.#allocatedRecords,
 			byteSizeOneRecord:this.#offset,
 			indexLastFieldUniqueValues:this.#indexLastFieldUniqueValues,
@@ -312,12 +316,13 @@ class DB_creating{
 			arrayFields:this.#arrayFields,
 			littleEndian:this.#littleEndian,
 			numberOutRange:this.#numberOutRange,
-			stringEncoding:this.#stringEncoding
+			stringEncoding:this.#stringEncoding,
+			recordsCountForAdditionInReallocation:this.#recordsCountForAdditionInReallocation
 		});
 	}
 };
 class DB_filling{
-	#maxRecords=0;
+	#recordsCountForAdditionInReallocation=0;
 	#allocatedRecords=0;
 	#currentRecords=0;
 	#byteSizeOneRecord=0;
@@ -352,12 +357,11 @@ class DB_filling{
 	/** @type {Map<DBSpecificValueTypes, number>} */
 	#mapNoNumberValueToCountUses=null;
 	/** @type {2 | 4 | 8} */
-	#levelSize=2;
-	#pointerString=0;
-	#pointerStringMax=2**(8*this.#levelSize)-1;
+	#countBytesForPointerInBufferOfValues=2;
+	#pointerSpecificValue=0;
+	#maxPointerSpecificValue=2**(8*this.#countBytesForPointerInBufferOfValues)-1;
 	/**
 	 * @typedef {{
-	 *   maxRecords:number,
 	 *   allocatedRecords:number,
 	 *   byteSizeOneRecord:number,
 	 *   indexLastFieldUniqueValues:number,
@@ -366,7 +370,8 @@ class DB_filling{
 	 *   arrayFields:DBField[],
 	 *   littleEndian:boolean,
 	 *   numberOutRange:DBSettingNumberToRange,
-	 *   stringEncoding: DBStringEncodingTypes
+	 *   stringEncoding: DBStringEncodingTypes,
+	 *   recordsCountForAdditionInReallocation:number,
 	 *   arrayBuffer?:ArrayBuffer
 	 *   currentRecords?:number
 	 *   levelSize?:number,
@@ -375,7 +380,7 @@ class DB_filling{
 	*/
 	/** @param {DBFillingObjectSettings} objectSettings */
 	constructor(objectSettings){
-		this.#maxRecords=objectSettings.maxRecords;
+		this.#recordsCountForAdditionInReallocation=objectSettings.recordsCountForAdditionInReallocation||0;
 		this.#allocatedRecords=objectSettings.allocatedRecords;
 		this.#byteSizeOneRecord=objectSettings.byteSizeOneRecord;
 		this.#indexLastFieldUniqueValues=objectSettings.indexLastFieldUniqueValues;
@@ -388,7 +393,7 @@ class DB_filling{
 			var objectOldFields=objectSettings.objectFields;
 			/** @type {DBField[]} */
 			var arrayNewFields=[];
-			var newByteSizeOneRecord=0;
+			newByteSizeOneRecord=0;
 			if(objectSettings.modificationsOnCreateFrom.deleteFields){
 				for(var i=0; i<arrayOldFields.length; ++i){
 					var oldField=arrayOldFields[i];
@@ -448,7 +453,7 @@ class DB_filling{
 		}
 		if(this.#indexLastFieldUniqueValues!==-1) this.#cacheFieldsUniqueValues={};
 		for(var i=0; (i<this.#arrayFields.length); ++i){
-			var field=this.#arrayFields[i]
+			var field=this.#arrayFields[i];
 			if(field.isFieldUniqueValues){
 				this.#cacheFieldsUniqueValues[field.name]=new Map();
 			} else {
@@ -457,7 +462,7 @@ class DB_filling{
 		}
 		this.#byteSizeOneRecord=newByteSizeOneRecord;
 		this.#arrayBuffer=new ArrayBuffer(this.#allocatedRecords*this.#byteSizeOneRecord, {
-			maxByteLength: this.#maxRecords*this.#byteSizeOneRecord
+			maxByteLength: (this.#allocatedRecords+this.#recordsCountForAdditionInReallocation)*this.#byteSizeOneRecord
 		});
 		this.#dataView=new DataView(this.#arrayBuffer);
 		for(var field of this.#arrayFields){
@@ -481,55 +486,64 @@ class DB_filling{
 			}
 		}
 		if(objectSettings.arrayBuffer){
-			this.#levelSize=objectSettings.levelSize;
+			this.#countBytesForPointerInBufferOfValues=objectSettings.levelSize;
+			this.#maxPointerSpecificValue=(this.#countBytesForPointerInBufferOfValues===8)?Number.MAX_SAFE_INTEGER:((2**(8*this.#countBytesForPointerInBufferOfValues))-1);
 			this.#currentRecords=objectSettings.currentRecords;
 			//add cache values from buffer to cache this storage
 			var dataViewOnOldBuffer=new DataView(objectSettings.arrayBuffer);
-			for(var i=oldByteSizeOneRecord*this.#allocatedRecords; i<objectSettings.arrayBuffer.byteLength;){
-				switch(objectSettings.levelSize){
-					case 2:
-						var pointer=dataViewOnOldBuffer.getUint16(i, this.#littleEndian);
-						i+=2;
-						break;
-					case 4:
-						var pointer=dataViewOnOldBuffer.getUint32(i, this.#littleEndian);
-						i+=4;
-						break;
-					case 8:
-						var pointer=dataViewOnOldBuffer.getFloat64(i, this.#littleEndian);
-						i+=8;
-						break;
-				}
-				var type=dataViewOnOldBuffer.getUint8(i);
-				i+=1;
-				switch(type){
-					case getNumberCodeFromTypeDB("String"):
-						var length=dataViewOnOldBuffer.getUint32(i, this.#littleEndian);
-						i+=4;
-						var value="";
-						if(this.#stringEncoding==="UTF-16"){
-							if(length===0) value="";
-							else {
-								for(i, max=i+length; i<max; ){
-									value+=String.fromCharCode(dataViewOnOldBuffer.getUint16(i, this.#littleEndian));
-									i+=2;
+			oldByteSizeOneRecord=objectSettings.byteSizeOneRecord;
+			if((checkFieldsForHaveThemFieldWithSpecificType(this.#arrayFields))){
+				for(var i=oldByteSizeOneRecord*this.#allocatedRecords; i<objectSettings.arrayBuffer.byteLength;){
+					switch(objectSettings.levelSize){
+						case 2:
+							var pointer=dataViewOnOldBuffer.getUint16(i, this.#littleEndian);
+							i+=2;
+							break;
+						case 4:
+							var pointer=dataViewOnOldBuffer.getUint32(i, this.#littleEndian);
+							i+=4;
+							break;
+						case 8:
+							var pointer=dataViewOnOldBuffer.getFloat64(i, this.#littleEndian);
+							i+=8;
+							break;
+					}
+					var type=dataViewOnOldBuffer.getUint8(i);
+					i+=1;
+					switch(type){
+						case getNumberCodeFromTypeDB("String"):
+							var length=dataViewOnOldBuffer.getUint32(i, this.#littleEndian);
+							i+=4;
+							var value="";
+							if(this.#stringEncoding==="UTF-16"){
+								if(length===0) value="";
+								else {
+									for(i, max=i+length; i<max; ){
+										value+=String.fromCharCode(dataViewOnOldBuffer.getUint16(i, this.#littleEndian));
+										i+=2;
+									}
 								}
 							}
-						}
-						break;
+							break;
+					}
+					this.#setCacheRecordAboutValue(value, pointer);
 				}
-				this.#setCacheRecordAboutValue(value, pointer);
 			}
 			//ArrayBuffer create with values
-			if(arrayNewFields){
+			if(objectSettings.modificationsOnCreateFrom.addFields || objectSettings.modificationsOnCreateFrom.deleteFields){
 				var oldByteSizeOneRecord=objectSettings.byteSizeOneRecord;
+				var oldCountRecords=objectSettings.currentRecords;
+				if(objectSettings.modificationsOnCreateFrom.deleteRecords){
+					var listDeletedRecords=(objectSettings.modificationsOnCreateFrom.deleteRecords.filter((elem, ind, arr)=>(arr.indexOf(elem)===ind) && (elem<this.#currentRecords)));
+					this.#currentRecords-=listDeletedRecords.length;
+				}
 				for(var indexField=0; indexField<this.#arrayFields.length; ++indexField){
 					var newField=this.#arrayFields[indexField];
 					var oldField=objectOldFields[newField.name];
 					if(oldField){
 						//In case that field already has
 						var indexCursor=0;
-						for(var indexRecord=0; indexRecord<this.#currentRecords; ++indexRecord){
+						for(var indexRecord=0; indexRecord<oldCountRecords; ++indexRecord){
 							if(!objectSettings.modificationsOnCreateFrom.deleteRecords?.includes(indexRecord)){
 								var value=this.#getValueFromBuffer(indexRecord, oldField, dataViewOnOldBuffer, oldByteSizeOneRecord);
 								this.#setValue(indexCursor, newField, value);
@@ -541,30 +555,44 @@ class DB_filling{
 						var objectWithInfo=objectSettings.modificationsOnCreateFrom.addFields.find(elem=>elem.field.name===newField.name);
 						if((!objectWithInfo.typeAddValues) || objectWithInfo.typeAddValues==="default"){
 							var indexCursor=0;
-							for(var indexRecord=0; indexRecord<this.#currentRecords; ++indexRecord){
+							var defaultValue=getDefaultValueFromFieldDescription(newField);
+							for(var indexRecord=0; indexRecord<oldCountRecords; ++indexRecord){
 								if(!objectSettings.modificationsOnCreateFrom.deleteRecords?.includes(indexRecord)){
-									this.#setValue(indexCursor, newField, newField.defaultValue);
+									this.#setValue(indexCursor, newField, defaultValue);
 									++indexCursor;
 								}
 							}
 						} else if(objectWithInfo.typeAddValues==="iterator"){
 							var indexCursor=0;
 							var indexRecord=0;
-							for(var valueFromIterator of objectWithInfo.values){
-								if(indexCursor===this.#currentRecords) break;
-								if(!objectSettings.modificationsOnCreateFrom.deleteRecords?.includes(indexRecord)){
+							if(objectSettings.modificationsOnCreateFrom.deleteRecords){
+								for(var valueFromIterator of objectWithInfo.values){
+									while(listDeletedRecords.includes(indexRecord)) {
+										//--this.#currentRecords;
+										++indexRecord;
+									}
+									if(indexCursor===this.#currentRecords) break;
 									var checking=this.#checkValueToPutInFieldWithUnique(indexCursor, newField, valueFromIterator);
 									if(checking!=="success") throw Error(checking);
 									this.#setValue(indexCursor, newField, valueFromIterator);
 									++indexCursor;
+									++indexRecord;
 								}
-								++indexRecord;
+							} else {
+								for(var valueFromIterator of objectWithInfo.values){
+									if(indexCursor===this.#currentRecords) break;
+									var checking=this.#checkValueToPutInFieldWithUnique(indexCursor, newField, valueFromIterator);
+									if(checking!=="success") throw Error(checking);
+									this.#setValue(indexCursor, newField, valueFromIterator);
+									++indexCursor;
+									++indexRecord;
+								}
 							}
-							if(indexCursor<this.#currentRecords){
+							if(indexCursor<oldCountRecords){
 								if(newField.isFieldUniqueValues) throw Error("Field unique values must have values");
 								else {
 									var value=getDefaultValueFromFieldDescription(newField);
-									for(indexCursor; indexCursor<this.#currentRecords; ++indexCursor){
+									for(indexCursor; indexCursor<oldCountRecords; ++indexCursor){
 										if(!objectSettings.modificationsOnCreateFrom.deleteRecords?.includes(indexCursor)){
 											this.#setValue(indexCursor, newField, value);
 										}
@@ -574,22 +602,56 @@ class DB_filling{
 						}
 					}
 				}
+			} else if(objectSettings.modificationsOnCreateFrom.deleteRecords) {
+				var indexCursor=0;
+				for(var indexRecord=0; indexRecord<this.#currentRecords; ++indexRecord){
+					if(!objectSettings.modificationsOnCreateFrom.deleteRecords?.includes(indexRecord)){
+						for(var field of this.#arrayFields){
+							var oldField=objectSettings.arrayFields.find(elem=>elem.name===field.name);
+							var value=this.#getValueFromBuffer(indexRecord, oldField, dataViewOnOldBuffer, this.#byteSizeOneRecord);
+							this.#setValue(indexCursor, field, value);
+						}
+						++indexCursor;
+					}
+				}
 				this.#currentRecords=indexCursor;
 			} else {
 				this.#replaceDataBufferByBuffer(this.#arrayBuffer, objectSettings.arrayBuffer, this.#byteSizeOneRecord*this.#allocatedRecords);
 			}
+			if(objectSettings.modificationsOnCreateFrom.deleteRecords?.length){
+				if(this.#mapNoNumberValueToPointer){
+					for(var value of this.#mapNoNumberValueToPointer.keys()){
+						if(!this.#mapNoNumberValueToCountUses.has(value)){
+							var pointer=this.#mapNoNumberValueToPointer.get(value);
+							this.#mapNoNumberValueToPointer.delete(value);
+							this.#mapPointerToNoNumberValue.delete(pointer)
+						}
+					}
+					this.#countBytesForPointerInBufferOfValues=2;
+					this.#selectLevelSizeOfCacheRecordToBuffer();
+				}
+			}
 		}
+		if(this.#allocatedRecords===0) this.#callbackAllocation.call(this, this.#currentRecords);
 	}
 	/**
 	 * Выделяет память под новые записи  
-	 * Возвращает новое количество записей на которых выделена память
+	 * Возвращает новое количество записей на которых выделена память  
 	 * Выкинет ошибку, если кол-во записей превышает maxRecords
 	 * @param {number} countRecords 
 	 */
 	allocateMemoryForRecords(countRecords){
-		if((typeof countRecords!=="number") || (countRecords<0) || (!Number.isInteger(countRecords))) throw Error("[allocateMemoryForRecords] 'countRecords' must be positive integer");
-		if((this.#allocatedRecords+countRecords)>this.#maxRecords) throw Error("[allocateMemoryForRecords] Cant allocate memory for records above maxRecords");
-		this.#arrayBuffer.resize(this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord);
+		if((!Number.isInteger(countRecords)) || (countRecords<0)) throw Error("[allocateMemoryForRecords] 1arg is 'countRecords' must be positive integer");
+		if(this.#arrayBuffer.resizable && (this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord<this.#arrayBuffer.maxByteLength)){
+			this.#arrayBuffer.resize(this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord);
+		} else {
+			var oldBuffer=this.#arrayBuffer;
+			var newByteLength=this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord;
+			this.#arrayBuffer=new ArrayBuffer(newByteLength, {
+				maxByteLength:newByteLength+this.#recordsCountForAdditionInReallocation*this.#byteSizeOneRecord
+			});
+			this.#replaceDataBufferByBuffer(this.#arrayBuffer, oldBuffer)
+		}
 		this.#dataView=new DataView(this.#arrayBuffer);
 		return this.#allocatedRecords+=countRecords;
 	}
@@ -601,10 +663,10 @@ class DB_filling{
 		if(this.#currentRecords===this.#allocatedRecords) throw Error("[addRecordByArgs] Do allocate memory for new records");
 		if(this.#indexLastFieldUniqueValues>(-1) && (values.length<=this.#indexLastFieldUniqueValues)) throw Error("[addRecordByArgs] Fields Unique Values must has value");
 		//checking values type before adding them
-		for(var i=0, max=values.length; i<max; ++i){
+		for(var i=0, max=Math.min(this.#arrayFields.length, values.length); i<max; ++i){
 			var value=values[i];
 			var field=this.#arrayFields[i];
-			var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, value);
+			var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#vadidateValue(field, value));
 			if(checking!=="success") throw Error("[addRecordByArgs] "+checking);
 		}
 		//adding values
@@ -631,7 +693,7 @@ class DB_filling{
 			var value=objectData[stringPropName];
 			var field=this.#objectFields[stringPropName];
 			if(field){
-				var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, value);
+				var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#vadidateValue(field, value));
 				if(checking!=="success") throw Error("[addRecordByObject] "+checking);
 			}
 		}
@@ -725,7 +787,6 @@ class DB_filling{
 	}
 	/**
 	 * @typedef {{
-	 *   maxRecords:number,
 	 *   currentRecords:number,
 	 *   allocatedRecords:number,
 	 *   byteSizeOneRecord:number,
@@ -744,17 +805,16 @@ class DB_filling{
 	 */
 	getInfo(){
 		return {
-			maxRecords:this.#maxRecords,
 			currentRecords:this.#currentRecords,
 			allocatedRecords:this.#allocatedRecords,
 			byteSizeOneRecord:this.#byteSizeOneRecord,
-			usedMemoryForBaseBuffer:this.getByteLength("base"),
+			usedMemoryForBaseBuffer:this.getByteLength("basebuffer"),
 			usedMemoryForAllData:this.getByteLength("alldata"),
 			fields:this.#arrayFields.map(elem=>({...elem})),
 			stringEncoding:this.#stringEncoding,
 			numberOutRange:this.#numberOutRange,
 			littleEndian:this.#littleEndian,
-			levelSize:this.#levelSize
+			levelSize:this.#countBytesForPointerInBufferOfValues
 		}
 	}
 	/**
@@ -771,9 +831,13 @@ class DB_filling{
 		if(!typeCalculation || typeCalculation==="basebuffer"){
 			result=this.#arrayBuffer.byteLength;
 		} else if(typeCalculation==="alldata"){
+			/*
+				Пожалуйста помни схему:
+				[pointer: 2 | 4 | 8 байт][type of value: 1 байт][length of value: 4 байта][? content: number байт]
+			*/
 			result=this.#arrayBuffer.byteLength;
 			if(this.#mapPointerToNoNumberValue){
-				var byteLengthPointers=this.#mapPointerToNoNumberValue.size*this.#levelSize;
+				var byteLengthPointers=this.#mapPointerToNoNumberValue.size*this.#countBytesForPointerInBufferOfValues;
 				var byteLengthLengthValue=this.#mapPointerToNoNumberValue.size*4;
 				var byteLengthTypeValue=this.#mapPointerToNoNumberValue.size*1;
 				var byteLengthValueData=0;
@@ -800,7 +864,7 @@ class DB_filling{
 			for(var pointer of this.#mapPointerToNoNumberValue.keys()){
 				var startOffset=offset;
 				var value=this.#mapPointerToNoNumberValue.get(pointer);
-				switch(this.#levelSize){
+				switch(this.#countBytesForPointerInBufferOfValues){
 					case 2:
 						dataview.setUint16(offset, pointer ,this.#littleEndian);
 						offset+=2;
@@ -846,6 +910,7 @@ class DB_filling{
 		checking=this.#checkStringIsFieldName(fieldName);
 		if(checking!=="success") throw Error("[setDataOfRecordInField] "+checking);
 		var field=this.#objectFields[fieldName];
+		value=this.#vadidateValue(field, value);
 		checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, value);
 		if(checking!=="success") throw Error("[setDataOfRecordInField] "+checking);
 		this.#setValue(indexRecord, field, value);
@@ -863,14 +928,22 @@ class DB_filling{
 		for(var stringPropName of keys){
 			var field=this.#objectFields[stringPropName];
 			if(field){
-				var checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, objectData[stringPropName]);
+				var checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, this.#vadidateValue(field, objectData[stringPropName]));
 				if(checking!=="success") throw Error("[setDataOfRecordByObject] "+checking);
 			}
 		}
 		for(var stringPropName of keys){
 			var field=this.#objectFields[stringPropName];
-			if(field) this.#setValue(indexRecord, field, objectData[stringPropName]);
+			if(field) this.#setValue(indexRecord, field, this.#vadidateValue(field, objectData[stringPropName]));
 		}
+	}
+	/**
+	 * 
+	 * @param {number} count 
+	 */
+	setRecordsCountForAdditionInReallocation(count){
+		if(!Number.isInteger(count) || (count<0)) throw Error("[setRecordsCountForAdditionInReallocation] 'count' must be positive integer");
+		this.#recordsCountForAdditionInReallocation=count;
 	}
 	/**
 	 * Найти индекс записи в Хранилище с данными равными из объекта (должны соответствовать данные все)
@@ -1091,10 +1164,10 @@ class DB_filling{
 	 * @param  {...JStypesToDBValue} values 
 	 */
 	#addRecordByArgs(...values){
-		for(var i=0, maxI=values.length; i<maxI; ++i){
+		for(var i=0, max=Math.min(values.length, this.#arrayFields.length); i<max; ++i){
 			var value=values[i];
 			var field=this.#arrayFields[i];
-			this.#setValue(this.#currentRecords, field, value);
+			this.#setValue(this.#currentRecords, field, this.#vadidateValue(field, value));
 		}
 		for(i; i<this.#arrayFields.length; ++i){
 			var field=this.#arrayFields[i];
@@ -1112,7 +1185,7 @@ class DB_filling{
 		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
 			var field=this.#arrayFields[i];
 			var fieldName=this.#arrayFields[i].name;
-			var value=Object.hasOwn(objectData, fieldName)?objectData[fieldName]: this.#objectFieldNameToDefaultValue[field.name];
+			var value=Object.hasOwn(objectData, fieldName)? this.#vadidateValue(field, objectData[fieldName]): this.#objectFieldNameToDefaultValue[field.name];
 			this.#setValue(this.#currentRecords, field, value)
 		}
 		this.#currentRecords+=1;
@@ -1196,51 +1269,6 @@ class DB_filling{
 	 */
 	#setValue(indexRecord, field, value){
 		var offset=this.#byteSizeOneRecord*indexRecord+field.offset;
-		//to range value
-		if(this.#numberOutRange==="toRange"){
-			switch(field.type){
-				case "Uint8":
-					if(value<0) value=0;
-					if(value>255) value=255;
-					break;
-				case "Uint16":
-					if(value<0) value=0;
-					if(value>65535) value=65535;
-					break;
-				case "Uint32":
-					if(value<0) value=0;
-					if(value>4_294_967_295) value=4_294_967_295;
-					break;
-				case "Int8":
-					if(value<-128) value=-128;
-					if(value>127) value=127;
-					break;
-				case "Int16":
-					if(value<-32_768) value=-32768;
-					if(value>32_767) value=32767;
-					break;
-				case "Int32":
-					if(value<-2_147_483_648) value=-2_147_483_648;
-					if(value>2_147_483_647) value=2_147_483_647;
-					break;
-				case "Float32":
-					if(value<-16_777_215) value=-16_777_215;
-					if(value>16_777_215) value=16_777_215;
-					break;
-				case "Float64":
-					if(value<-9_007_199_254_740_992) value=-9_007_199_254_740_992;
-					if(value>9_007_199_254_740_992) value=9_007_199_254_740_992;
-					break;
-				case "BigInt64":
-					if(value<-9_223_372_036_854_775_808n) value=-9_223_372_036_854_775_808n;
-					if(value>9_223_372_036_854_775_807n) value=9_223_372_036_854_775_807n;
-					break;
-				case "BigUint64":
-					if(value<0n) value=0n;
-					if(value>18_446_744_073_709_551_615n) value=18_446_744_073_709_551_615n;
-					break;
-			}
-		}
 		//установить в кеш
 		if(field.isFieldUniqueValues){
 			if((indexRecord<this.#currentRecords)){
@@ -1358,17 +1386,17 @@ class DB_filling{
 	#setCacheRecordAboutValue(value, pointer){
 		if(typeof pointer!=="number"){
 			while(true){
-				if(this.#mapPointerToNoNumberValue.has(this.#pointerString)){
-					if(this.#pointerString===this.#pointerStringMax) this.#pointerString=0;
-					else ++this.#pointerString;
+				if(this.#mapPointerToNoNumberValue.has(this.#pointerSpecificValue)){
+					if(this.#pointerSpecificValue===this.#maxPointerSpecificValue) this.#pointerSpecificValue=0;
+					else ++this.#pointerSpecificValue;
 				} else {
-					this.#mapPointerToNoNumberValue.set(this.#pointerString, value);
+					this.#mapPointerToNoNumberValue.set(this.#pointerSpecificValue, value);
 					break;
 				}
 			}
-			this.#mapNoNumberValueToPointer.set(value, this.#pointerString);
-			this.#mapPointerToNoNumberValue.set(this.#pointerString, value);
-			var selectedPointer=this.#pointerString;
+			this.#mapNoNumberValueToPointer.set(value, this.#pointerSpecificValue);
+			this.#mapPointerToNoNumberValue.set(this.#pointerSpecificValue, value);
+			var selectedPointer=this.#pointerSpecificValue;
 		} else {
 			this.#mapPointerToNoNumberValue.set(pointer, value);
 			this.#mapNoNumberValueToPointer.set(value, pointer);
@@ -1397,20 +1425,14 @@ class DB_filling{
 		}
 	}
 	#selectLevelSizeOfCacheRecordToBuffer(){
-		//select formula: Math.floor(2**(levelSize*8-0.1));
-		switch(this.#levelSize){
-			case 2:
-				if(this.#mapPointerToNoNumberValue.size>61147){
-					this.#levelSize=4;
-					this.#pointerStringMax=2**32-1;
-				}
-				break;
-			case 4:
-				if(this.#mapPointerToNoNumberValue.size>4007346184){
-					this.#levelSize=8;
-					this.#pointerStringMax=Number.MAX_SAFE_INTEGER;
-				}
-				break;
+		//selected formula: Math.floor(2**(levelSize*8-0.1));
+		if(this.#countBytesForPointerInBufferOfValues==2 && this.#mapPointerToNoNumberValue.size>61147){
+			this.#countBytesForPointerInBufferOfValues=4;
+			this.#maxPointerSpecificValue=2**32-1;
+		}
+		if(this.#countBytesForPointerInBufferOfValues==4 && this.#mapPointerToNoNumberValue.size>4007346184){
+			this.#countBytesForPointerInBufferOfValues=8;
+			this.#maxPointerSpecificValue=Number.MAX_SAFE_INTEGER;
 		}
 	}
 	/**
@@ -1456,7 +1478,7 @@ class DB_filling{
 	 */
 	#checkIndexRecordValidate(indexRecord){
 		var result="success";
-		if((typeof indexRecord!=="number") || (indexRecord<0)) result=("'indexRecord' parameter must be positive number");
+		if((!Number.isInteger(indexRecord)) || (indexRecord<0)) result=("'indexRecord' parameter must be positive integer");
 		if(indexRecord>=this.#currentRecords) result=("'indexRecord' cant be more than current records count");
 		return result;
 	}
@@ -1468,9 +1490,9 @@ class DB_filling{
 	 */
 	#checkIndexFromAndToValidate(indexFrom, indexTo){
 		var result="success";
-		if((typeof indexFrom!=="number") || (indexFrom<0)) result="'from' parameter must be positive integer";
+		if((!Number.isInteger(indexFrom)) || (indexFrom<0)) result="'from' parameter must be positive integer";
 		if(indexFrom>this.#currentRecords) result=("'from' cant be more than current records count")
-		if((typeof indexTo!=="number") || (indexTo<0)) result=("'to' parameter must be positive integer");
+		if((!Number.isInteger(indexTo)) || (indexTo<0)) result=("'to' parameter must be positive integer");
 		if(indexTo>this.#currentRecords) result=("'to' parameter must be no more than current count records");
 		if(indexFrom>indexTo) result=("'from' parameter cant be more then 'to' parameter");
 		return result;
@@ -1482,7 +1504,7 @@ class DB_filling{
 	 */
 	#checkStringIsFieldName(string){
 		var result="success";
-		if(!this.#objectFields[string]) result="Database doesnot have field with name "+string;
+		if(!Object.hasOwn(this.#objectFields, string)) result="Database doesnot have field with name "+string;
 		return result;
 	}
 	/**
@@ -1505,7 +1527,7 @@ class DB_filling{
 			var indexRecordWithSameValue=this.#cacheFieldsUniqueValues[field.name].get(value);
 			if(indexRecordWithSameValue!=null && (indexRecordWithSameValue!==indexRecord)) result=("Field "+field.name+" unique values already has "+value+" value");
 		}
-		if(result==="success") checkValueToPutInField(field, value, this.#numberOutRange);
+		if(result==="success") result=checkValueToPutInField(field, value, this.#numberOutRange);
 		return result;
 	}
 	/**
@@ -1518,18 +1540,70 @@ class DB_filling{
 		return ((index>=from) && (index<to));
 	}
 	/**
+	 * Возвращает значение с учетом диапазонов.  
+	 * Значение будет отличаться, при условии что оно вне диапозонов
+	 * @param {DBField} field 
+	 * @param {JStypesToDBValue} value 
+	 */
+	#vadidateValue(field, value){
+		var result=value;
+		if(this.#numberOutRange==="toRange"){
+			switch(field.type){
+				case "Uint8":
+					if(value<0) result=0;
+					if(value>255) result=255;
+					break;
+				case "Uint16":
+					if(value<0) result=0;
+					if(value>65535) result=65535;
+					break;
+				case "Uint32":
+					if(value<0) result=0;
+					if(value>4_294_967_295) result=4_294_967_295;
+					break;
+				case "Int8":
+					if(value<-128) result=-128;
+					if(value>127) result=127;
+					break;
+				case "Int16":
+					if(value<-32_768) result=-32768;
+					if(value>32_767) result=32767;
+					break;
+				case "Int32":
+					if(value<-2_147_483_648) result=-2_147_483_648;
+					if(value>2_147_483_647) result=2_147_483_647;
+					break;
+				case "Float32":
+					if(value<-16_777_215) result=-16_777_215;
+					if(value>16_777_215) result=16_777_215;
+					break;
+				case "Float64":
+					if(value<-9_007_199_254_740_992) result=-9_007_199_254_740_992;
+					if(value>9_007_199_254_740_992) result=9_007_199_254_740_992;
+					break;
+				case "BigInt64":
+					if(value<-9_223_372_036_854_775_808n) result=-9_223_372_036_854_775_808n;
+					if(value>9_223_372_036_854_775_807n) result=9_223_372_036_854_775_807n;
+					break;
+				case "BigUint64":
+					if(value<0n) result=0n;
+					if(value>18_446_744_073_709_551_615n) result=18_446_744_073_709_551_615n;
+					break;
+			}
+		}
+		return result;
+	}
+	/**
 	 * Заменяет данные одного буффера данными второго
 	 * @param {ArrayBuffer} targetBuffer 
 	 * @param {ArrayBuffer} anotherBuffer 
 	 * @param {number} byteLength 
+	 * @returns {ArrayBuffer}
 	 */
 	#replaceDataBufferByBuffer(targetBuffer, anotherBuffer, byteLength){
-		var typedArrayOnTagretBuffer=new Uint8Array(targetBuffer);
+		var typedArrayOnTargetBuffer=new Uint8Array(targetBuffer);
 		var typedArrayOnAnotherBuffer=new Uint8Array(anotherBuffer);
-		var max=(typeof byteLength==="number")?byteLength:typedArrayOnAnotherBuffer.length;
-		for(var i=0; i<max; ++i){
-			typedArrayOnTagretBuffer[i]=typedArrayOnAnotherBuffer[i];
-		}
+		typedArrayOnTargetBuffer.set(typedArrayOnAnotherBuffer);
 		return targetBuffer;
 	}
 	/**
@@ -1730,7 +1804,7 @@ function checkFieldTypeForValueType(field, value){
  * Использовать **только** для проверки типов и диапазонов
  * @param {DBField} field 
  * @param {JStypesToDBValue} value 
- * @param {boolean} numberOutRange 
+ * @param {DBSettingNumberToRange} numberOutRange 
  * @returns {"success" | string}
  */
 function checkValueToPutInField(field, value, numberOutRange){
@@ -1753,6 +1827,7 @@ function checkValueToPutInField(field, value, numberOutRange){
 			case "BigUint64":
 			case "Bool":
 			case "Dynamic":
+				break;
 		}
 	}
 	if(result==="success"){
@@ -1851,15 +1926,12 @@ function getDefaultValueByType(type){
 	return value;
 }
 /**
- * Создает поле любых значений хранилища
- * @param {string} name 
- * @param {DBValueTypes} type 
- * @param {JStypesToDBValue} [defaultValue] 
+ * Проверить значение на является ли оно целочисленным и положительным
+ * @param {number} value 
+ * @returns {boolean}
  */
-function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(type)){
-	/** @type {DBField} */
-	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:defaultValue, to: typeof defaultValue}};
-	return objectField;
+function checkValueIsPositiveInteger(value){
+	return ((Number.isInteger(value)) && (value>=0));
 }
 /**
  * @param {DBField} field 
@@ -1882,5 +1954,59 @@ function getDefaultValueFromFieldDescription(field){
 			break;
 	}
 	return value;
+}
+/**
+ * No working. No use
+ */
+class InnerExtendedDataView extends DataView {
+	/**
+	 * @param {number} offset 
+	 * @param {number} value 
+	 * @param {boolean} [littleEndian] 
+	 */
+	getUint24(offset, value, littleEndian){
+		var result=0;
+		if(littleEndian){
+			result=this.getUint8(offset)+this.getUint8(offset+1)*256+this.getUint8(offset+2)*65536;
+		} else {
+			result=this.getUint8(offset+2)+this.getUint8(offset+1)*256+this.getUint8(offset)*65536;
+		}
+		return result;
+	}
+	/**
+	 * @param {number} offset 
+	 * @param {number} value 
+	 * @param {boolean} [littleEndian] 
+	 */
+	setUint24(offset, value, littleEndian){
+		if(littleEndian){
+			var num=Math.floor(value/256);
+			this.setUint8(offset, value%256);
+			this.setUint8(offset+1, num);
+			this.setUint8(offset+2, );
+		} else {
+		}
+	}
+}
+//Public functions
+/**
+ * Создает поле любых значений хранилища
+ * @param {string} name 
+ * @param {DBValueTypes} type 
+ * @param {JStypesToDBValue} [defaultValue] 
+ */
+function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(type)){
+	var checking=getByteSizeFieldByType(type);
+	/** @type {DBField} */
+	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:typeof defaultValue==="boolean"?"":defaultValue?.toString(), to: typeof defaultValue}};
+	if(defaultValue!=undefined){
+		var checking=checkFieldTypeForValueType(objectField, defaultValue);
+		if(checking!=="success") throw Error(checking);
+	} else {
+		var value=getDefaultValueByType(objectField.type);
+		objectField.defaultValue.value=typeof value==="boolean"?"":value?.toString();
+		objectField.defaultValue.to=typeof value;
+	}
+	return objectField;
 }
 export {DataStorage, createFieldAnyValues}

@@ -10,3 +10,26 @@
 * Хранимые типы данных: Number, немного BigInt, Bool и String (а также Dynamic)
 * В коде используется Map объекты как кеши данных, для более быстрого их поиска в хранилище
 * Строки хранятся в основном буффере как указатели, как следствие копий строк не создается, если 2 строки хранятся в двух разных записях
+# Примеры использования:
+Обычное применение:
+```js
+import {DataStorage, createFieldAnyValues} from "./DataStorageConstructor.mjs";
+var db=DataStorage.create(0)
+    .addFieldUniqueValues("Id","Uint32")
+    .addFieldAnyValues("somedata", "String", "")
+    .addFieldAnyValues("isAdmin", "Bool", false)
+    .setCallbackAllocation(function(cur){
+        this.allocateMemoryForRecords(100);
+    })
+    .endCreation();
+//add record to storage
+db.addRecordByObject({Id:-12910101, somedata:"myfriend"});
+//change data in record
+db.setRecordDataByObject(0, {somedata:"no more friend"});
+//get data all records
+db.getRecordsData();
+//get buffer for save
+db.getBuffer();
+//get info for save
+db.getInfo();
+```

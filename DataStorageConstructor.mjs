@@ -465,26 +465,6 @@ class DB_filling{
 			maxByteLength: (this.#allocatedRecords+this.#recordsCountForAdditionInReallocation)*this.#byteSizeOneRecord
 		});
 		this.#dataView=new DataView(this.#arrayBuffer);
-		for(var field of this.#arrayFields){
-			//create in cache data about default values
-			if(field.isFieldUniqueValues===false){
-				if(!this.#objectFieldNameToDefaultValue) this.#objectFieldNameToDefaultValue={};
-				var value=getDefaultValueFromFieldDescription(field);
-				this.#objectFieldNameToDefaultValue[field.name]=value;
-				switch(field.type){
-					case "Dynamic":
-					case "String":
-						switch(typeof value){
-							case "string":
-								if(!this.#mapNoNumberValueToCountUses.has(value)){
-									var pointer=this.#setCacheRecordAboutValue(value);
-									this.#mapNoNumberValueToCountUses.set(value, Infinity);
-								}
-						}
-						break;
-				}
-			}
-		}
 		if(objectSettings.arrayBuffer){
 			this.#countBytesForPointerInBufferOfValues=objectSettings.levelSize;
 			this.#maxPointerSpecificValue=(this.#countBytesForPointerInBufferOfValues===8)?Number.MAX_SAFE_INTEGER:((2**(8*this.#countBytesForPointerInBufferOfValues))-1);
@@ -632,16 +612,35 @@ class DB_filling{
 				}
 			}
 		}
+		for(var field of this.#arrayFields){
+			//create in cache data about default values
+			if(field.isFieldUniqueValues===false){
+				if(!this.#objectFieldNameToDefaultValue) this.#objectFieldNameToDefaultValue={};
+				var value=getDefaultValueFromFieldDescription(field);
+				this.#objectFieldNameToDefaultValue[field.name]=value;
+				switch(field.type){
+					case "Dynamic":
+					case "String":
+						switch(typeof value){
+							case "string":
+								if(!this.#mapNoNumberValueToCountUses.has(value)){
+									var pointer=this.#setCacheRecordAboutValue(value);
+									this.#mapNoNumberValueToCountUses.set(value, Infinity);
+								}
+						}
+						break;
+				}
+			}
+		}
 		if(this.#allocatedRecords===0) this.#callbackAllocation.call(this, this.#currentRecords);
 	}
 	/**
 	 * Выделяет память под новые записи  
 	 * Возвращает новое количество записей на которых выделена память  
-	 * Выкинет ошибку, если кол-во записей превышает maxRecords
 	 * @param {number} countRecords 
 	 */
 	allocateMemoryForRecords(countRecords){
-		if((!Number.isInteger(countRecords)) || (countRecords<0)) throw Error("[allocateMemoryForRecords] 1arg is 'countRecords' must be positive integer");
+		if(!checkValueIsPositiveInteger(countRecords)) throw Error("[allocateMemoryForRecords] 1arg is 'countRecords' must be positive integer");
 		if(this.#arrayBuffer.resizable && (this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord<this.#arrayBuffer.maxByteLength)){
 			this.#arrayBuffer.resize(this.#arrayBuffer.byteLength+countRecords*this.#byteSizeOneRecord);
 		} else {
@@ -656,7 +655,7 @@ class DB_filling{
 		return this.#allocatedRecords+=countRecords;
 	}
 	/**
-	 * Добавить запись, данные будут заполняться последовательно аргументам при вызове метода  
+	 * Добавить запись, данные будут заполняться по схеме: индекс аргумента - индекс поля
 	 * @param  {...JStypesToDBValue} values 
 	 */
 	addRecordByArgs(...values){
@@ -1478,7 +1477,7 @@ class DB_filling{
 	 */
 	#checkIndexRecordValidate(indexRecord){
 		var result="success";
-		if((!Number.isInteger(indexRecord)) || (indexRecord<0)) result=("'indexRecord' parameter must be positive integer");
+		if(!checkValueIsPositiveInteger(indexRecord)) result=("'indexRecord' parameter must be positive integer");
 		if(indexRecord>=this.#currentRecords) result=("'indexRecord' cant be more than current records count");
 		return result;
 	}
@@ -1726,7 +1725,11 @@ class DBCursorToFieldByIndex{
 		return {field:this.#field.name, indexRecord:this.#indexRecord};
 	}
 }
-/** @param {DBValueTypes} type */
+/**
+ * Вернет int байт по типу  
+ * Если такого типа нет, выбросит ошибку
+ * @param {DBValueTypes} type
+ */
 function getByteSizeFieldByType(type){
 	var byteSize=0;
 	switch(type){
@@ -1998,13 +2001,13 @@ class InnerExtendedDataView extends DataView {
 function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(type)){
 	var checking=getByteSizeFieldByType(type);
 	/** @type {DBField} */
-	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:typeof defaultValue==="boolean"?"":defaultValue?.toString(), to: typeof defaultValue}};
+	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:typeof defaultValue==="boolean"?(defaultValue?"true":""):defaultValue?.toString(), to: typeof defaultValue}};
 	if(defaultValue!=undefined){
 		var checking=checkFieldTypeForValueType(objectField, defaultValue);
 		if(checking!=="success") throw Error(checking);
 	} else {
 		var value=getDefaultValueByType(objectField.type);
-		objectField.defaultValue.value=typeof value==="boolean"?"":value?.toString();
+		objectField.defaultValue.value=typeof value==="boolean"?(defaultValue?"true":""):value?.toString();
 		objectField.defaultValue.to=typeof value;
 	}
 	return objectField;

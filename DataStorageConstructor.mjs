@@ -75,6 +75,10 @@ function getTypeDBFromNumberCode(code){
 	}
 	return type;
 }
+/**
+ * Коллекция Хранилищ и заданных для них callbackAllocation
+ * @type {WeakMap<DB_filling, CallbackAllocation>}
+ */
 var mapStorageToCallbackAllocation=new WeakMap();
 /**
  * Эта функция будет вызываться когда число записей станет равно числу выделенных записей  
@@ -256,7 +260,6 @@ class DB_creating{
 	#allocatedRecords=0;
 	#offset=0;
 	#byteSizeOneRecord=0;
-	#indexLastFieldUniqueValues=-1;
 	/** @type {CallbackAllocation} */
 	#callbackAllocation=null;
 	#littleEndian=false;
@@ -316,7 +319,6 @@ class DB_creating{
 		var byteSize=getByteSizeFieldByType(type);
 		if(Object.hasOwn(this.#objectFields,name)) throw Error(`[addFieldUniqueValues] Field ${name} already has in DB`);
 		var objectField={name, type, offset:this.#offset, isFieldUniqueValues:true};
-		this.#indexLastFieldUniqueValues=this.#arrayFields.length;
 		this.#arrayFields.push(objectField);
 		this.#objectFields[name]=objectField;
 		this.#offset+=byteSize;
@@ -364,7 +366,6 @@ class DB_creating{
 		return new DB_filling({
 			allocatedRecords:this.#allocatedRecords,
 			byteSizeOneRecord:this.#offset,
-			indexLastFieldUniqueValues:this.#indexLastFieldUniqueValues,
 			hasFieldSpecificValues:checkFieldsForHaveThemFieldWithSpecificType(this.#arrayFields),
 			callbackAllocation:this.#callbackAllocation,
 			objectFields:this.#objectFields,
@@ -435,7 +436,6 @@ class DB_filling{
 	 * @typedef {{
 	 *   allocatedRecords:number,
 	 *   byteSizeOneRecord:number,
-	 *   indexLastFieldUniqueValues:number,
 	 *   callbackAllocation:function,
 	 *   objectFields:Record<string, DBField>,
 	 *   arrayFields:DBField[],
@@ -452,12 +452,11 @@ class DB_filling{
 	*/
 	/** @param {DBFillingObjectSettings} objectSettings */
 	constructor(objectSettings){
-		mapStorageToCallbackAllocation.set(this, objectSettings.callbackAllocation)
+		mapStorageToCallbackAllocation.set(this, objectSettings.callbackAllocation);
 		//Получаем общие данные
 		//Эти данные ОБЯЗАТЕЛЬНЫ К ПЕРЕДАЧЕ
 		this.#allocatedRecords=objectSettings.allocatedRecords;
 		this.#byteSizeOneRecord=objectSettings.byteSizeOneRecord;
-		this.#indexLastFieldUniqueValues=objectSettings.indexLastFieldUniqueValues;
 		this.#callbackAllocation=objectSettings.callbackAllocation;
 		this.#objectFields=objectSettings.objectFields;
 		this.#arrayFields=objectSettings.arrayFields;
@@ -483,7 +482,6 @@ class DB_filling{
 						}
 					}
 				} else arrayNewFields=this.#arrayFields;
-				offset=arrayNewFields[arrayNewFields.length-1].offset;
 				if(modifications.addFields){
 					for(var fieldSettings of modifications.addFields){
 						var field=fieldSettings.field;
@@ -522,12 +520,14 @@ class DB_filling{
 			if(this.#minimizeBytesToBoolFields){
 				//Если указано минимизировать поля bool
 				//Перезадайте отступы для каждого поля
-				for(var i=0, max=this.#arrayFieldsBoolTypes.length; i<max; ++i){
-					var field=this.#arrayFieldsBoolTypes[i];
-					field.offset=this.#byteSizeOneRecord+(Math.floor(i/8));
+				if(this.#arrayFieldsBoolTypes){
+					for(var i=0, max=this.#arrayFieldsBoolTypes.length; i<max; ++i){
+						var field=this.#arrayFieldsBoolTypes[i];
+						field.offset=this.#byteSizeOneRecord+(Math.floor(i/8));
+					}
+					//Добавьте байт под биты
+					this.#byteSizeOneRecord+=Math.ceil(this.#arrayFieldsBoolTypes.length/8);
 				}
-				//Добавьте байт под биты
-				this.#byteSizeOneRecord+=Math.ceil(this.#arrayFieldsBoolTypes.length/8);
 			}
 			//Если есть поля особых данных, то сделайте карты для поиска их и счетчик, сколько каждое данное встречается
 			if(checkFieldsForHaveThemFieldWithSpecificType(this.#arrayFields)){
@@ -556,6 +556,14 @@ class DB_filling{
 			});
 			this.#dataView=new DataView(this.#arrayBuffer);
 		}
+		//Установить индекс последнего поля уникальных значений
+		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
+			var field=this.#arrayFields[i];
+			if(field.isFieldUniqueValues) this.#indexLastFieldUniqueValues=i;
+		}
+		if(this.#arrayFields===null) this.#arrayFields=[];
+		if(this.#arrayFieldsAnyValues===null) this.#arrayFieldsAnyValues=[];
+		if(this.#arrayFieldsUniqueValues===null) this.#arrayFieldsUniqueValues=[];
 		if(!objectSettings.arrayBuffer){
 			//Если создаем хранилище, а не делаем бекап
 			//Установить дефолт.значения

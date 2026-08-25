@@ -80,6 +80,7 @@ function getTypeDBFromNumberCode(code){
  * @type {WeakMap<DB_filling, CallbackAllocation>}
  */
 var mapStorageToCallbackAllocation=new WeakMap();
+var SymbolUseDefaultValue=Symbol("defaultValueInIterator");
 /**
  * Эта функция будет вызываться когда число записей станет равно числу выделенных записей  
  * Рекомендуется в эту функцию добавить вызов метода на выделение памяти
@@ -153,7 +154,7 @@ var DataStorage={
 	 * @param {DBSettingsToFromBuffer} objectSettings 
 	 */
 	createFrom(jsoninfo, buffer, objectSettings){
-		if(!objectSettings || (typeof objectSettings.callbackAllocation!=="function")) throw Error("[createFrom] 'callbackAllocation' must be setted a function")
+		if(!objectSettings || (typeof objectSettings.callbackAllocation!=="function")) throw Error("[DataStorage][createFrom] 'callbackAllocation' must be setted a function")
 		/** @type {ObjectDBInfo} */
 		var object=JSON.parse(jsoninfo);
 		var objectFields={};
@@ -700,6 +701,7 @@ class DB_filling{
 								//Если новое поле указано заполнить итератором
 								var indexRecord=0;
 								var maxIndexRecord=this.#currentRecords;
+								var defaultValue=getDefaultValueFromFieldDescription(newField);
 								if(modificationDeleteRecords){
 									//Если есть массив удаляемых записей
 									for(var value of newFieldSettings.values){
@@ -707,6 +709,12 @@ class DB_filling{
 											++indexRecord;
 										}
 										if(indexCursorInNewBuffer>=maxIndexRecord) break;
+										if(value===SymbolUseDefaultValue) {
+											if(newField.isFieldUniqueValues) throw Error("Fields unique values cant have default values")
+											value=defaultValue;
+										}
+										var checking=this.#checkValueToPutInFieldWithUnique(indexCursorInNewBuffer, newField, value);
+										if(checking!=="success") throw Error("[DataStorage]"+checking);
 										this.#setValue(indexCursorInNewBuffer, newField, value);
 										indexCursorInNewBuffer+=1;
 										++indexRecord;
@@ -715,6 +723,12 @@ class DB_filling{
 									//Если нет массива удаляемых записей
 									for(var value of newFieldSettings.values){
 										if(indexCursorInNewBuffer>=maxIndexRecord) break;
+										if(value===SymbolUseDefaultValue) {
+											if(newField.isFieldUniqueValues) throw Error("Fields unique values cant have default values")
+											value=defaultValue;
+										}
+										var checking=this.#checkValueToPutInFieldWithUnique(indexCursorInNewBuffer, newField, value);
+										if(checking!=="success") throw Error("[DataStorage]"+checking);
 										this.#setValue(indexCursorInNewBuffer, newField, value);
 										indexCursorInNewBuffer+=1;
 									}
@@ -2219,4 +2233,4 @@ function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(typ
 	}
 	return objectField;
 }
-export {DataStorage, createFieldAnyValues}
+export {DataStorage, createFieldAnyValues, SymbolUseDefaultValue}

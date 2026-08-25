@@ -1,10 +1,11 @@
 /**
  * @typedef {"UTF-16"} DBStringEncodingTypes
  * @typedef {"Uint8" | "Uint16" | "Uint32" | "Int8" | "Int16" | "Int32" | "Float32" | "Float64"} DBNumberTypes
+ * @typedef {"Uint24"} DBStrangeDataViewTypes
  * @typedef {"BigInt64" | "BigUint64"} DBBigIntTypes
  * @typedef {"Bool"} DBBooleanTypes
  * @typedef {string | number | boolean | bigint} JStypesToDBValue
- * @typedef {'String' | DBNumberTypes | DBBigIntTypes | DBBooleanTypes | "Dynamic"} DBValueTypes
+ * @typedef {'String' | DBNumberTypes | DBBigIntTypes | DBStrangeDataViewTypes | DBBooleanTypes | "Dynamic"} DBValueTypes
  * @typedef {string} DBSpecificValueTypes
  * @typedef {"Number" | "Bool" | "String" | "BigInt64" | "BigUint64"} DBTypesForFieldWithDynamicType
  * @typedef {{
@@ -80,6 +81,10 @@ function getTypeDBFromNumberCode(code){
  * @type {WeakMap<DB_filling, CallbackAllocation>}
  */
 var mapStorageToCallbackAllocation=new WeakMap();
+/**
+ * Данный Symbol используется для modifications addFields в итераторах - верните как значение его в итераторе, чтобы в поле записи было установлено дефолт.значение
+ * @type {Symbol}
+ */
 var SymbolUseDefaultValue=Symbol("defaultValueInIterator");
 /**
  * Эта функция будет вызываться когда число записей станет равно числу выделенных записей  
@@ -99,6 +104,7 @@ var DataStorage={
 	 * * stringEncoding: string - кодировка строк в Хранилище. Допустимо "UTF-16"
 	 * * recordsCountForAdditionInReallocation: number
 	 * * minimizeBytesToBoolFields: boolean - минимизировать выделяемую память под поля с Bool типом
+	 * 
 	 * @param {number} allocatedRecords 
 	 * @param {DBCreationObjectSettings} [objectSettings] 
 	 * @returns {DB_creating}
@@ -166,7 +172,7 @@ var DataStorage={
 					if(!field) throw Error("[DataStorage][createFrom][modifications][addFields] 'field' must be DBField");
 					if(typeof field.isFieldUniqueValues!=="boolean") throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'isFieldUniqueValues' must be boolean");
 					if(typeof field.name!=="string") throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'name' must be string type");
-					if(getByteSizeFieldByType(field.type)===0) throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'type' no valid");
+					if(getByteSizeFieldByType(field.type, object.allowSpecialDataViewTypes)===0) throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'type' no valid");
 					if(!field.isFieldUniqueValues){
 						if(checkFieldTypeForValueType(field, getDefaultValueFromFieldDescription(field))!=="success") throw Error("[DataStorage][createFrom] defaultValue no compare with type field");
 					}
@@ -202,6 +208,7 @@ var DataStorage={
 			littleEndian:object.littleEndian,
 			recordsCountForAdditionInReallocation:object.recordsCountForAdditionInReallocation,
 			minimizeBytesToBoolFields:object.minimizeBytesToBoolFields,
+			allowSpecialDataViewTypes:object.allowSpecialDataViewTypes,
 			arrayBuffer:buffer,
 			levelSize:object.levelSize,
 			modificationsOnCreateFrom:objectSettings.modifications
@@ -247,6 +254,7 @@ var DataStorage={
 			littleEndian:object.littleEndian,
 			recordsCountForAdditionInReallocation:object.recordsCountForAdditionInReallocation,
 			minimizeBytesToBoolFields:object.minimizeBytesToBoolFields,
+			allowSpecialDataViewTypes:object.allowSpecialDataViewTypes,
 			arrayBuffer:buffer,
 			levelSize:object.levelSize,
 		})
@@ -269,6 +277,7 @@ class DB_creating{
 	/** @type {DBStringEncodingTypes} */
 	#stringEncoding="UTF-16";
 	#minimizeBytesToBoolFields=false;
+	#allowSpecialDataViewTypes=false;
 	/**
 	 * @typedef {{
 	 *   littleEndian?:boolean,
@@ -276,6 +285,7 @@ class DB_creating{
 	 *   stringEncoding?: DBStringEncodingTypes
 	 *   recordsCountForAdditionInReallocation?:number,
 	 *   minimizeBytesToBoolFields?:boolean
+	 *   allowSpecialDataViewTypes?:boolean
 	 * }} DBCreationObjectSettings
 	 */
 	/**
@@ -287,6 +297,7 @@ class DB_creating{
 		if(objectSettings && typeof objectSettings==="object"){
 			this.#littleEndian=!!objectSettings.littleEndian;
 			this.#minimizeBytesToBoolFields=!!objectSettings.minimizeBytesToBoolFields;
+			this.#allowSpecialDataViewTypes=!!objectSettings.allowSpecialDataViewTypes;
 			if(Object.hasOwn(objectSettings, "numberOutRange")){
 				switch(objectSettings.numberOutRange){
 					case "error":
@@ -317,7 +328,7 @@ class DB_creating{
 	 * @param {DBValueTypes} type 
 	 */
 	addFieldUniqueValues(name, type){
-		var byteSize=getByteSizeFieldByType(type);
+		var byteSize=getByteSizeFieldByType(type, this.#allowSpecialDataViewTypes);
 		if(Object.hasOwn(this.#objectFields,name)) throw Error(`[addFieldUniqueValues] Field ${name} already has in DB`);
 		var objectField={name, type, offset:this.#offset, isFieldUniqueValues:true};
 		this.#arrayFields.push(objectField);
@@ -333,7 +344,7 @@ class DB_creating{
 	 * @param {JStypesToDBValue} [defaultValue]
 	 */
 	addFieldAnyValues(name, type, defaultValue){
-		var byteSize=getByteSizeFieldByType(type);
+		var byteSize=getByteSizeFieldByType(type, this.#allowSpecialDataViewTypes);
 		if(byteSize===0) throw Error("Type no valid");
 		if(Object.hasOwn(this.#objectFields,name)) throw Error(`[addFieldAnyValues] Field ${name} already has in DB`);
 		/** @type {DBField} */
@@ -375,7 +386,8 @@ class DB_creating{
 			numberOutRange:this.#numberOutRange,
 			stringEncoding:this.#stringEncoding,
 			recordsCountForAdditionInReallocation:this.#recordsCountForAdditionInReallocation,
-			minimizeBytesToBoolFields:this.#minimizeBytesToBoolFields
+			minimizeBytesToBoolFields:this.#minimizeBytesToBoolFields,
+			allowSpecialDataViewTypes:this.#allowSpecialDataViewTypes
 		});
 	}
 };
@@ -394,6 +406,7 @@ class DB_filling{
 	/** @type {DBStringEncodingTypes} */
 	#stringEncoding="UTF-16";
 	#minimizeBytesToBoolFields=false;
+	#allowSpecialDataViewTypes=false;
 	/** @type {ArrayDBFields} */
 	#arrayFieldsBoolTypes=null;
 	/** @type {CallbackAllocation} */
@@ -445,6 +458,7 @@ class DB_filling{
 	 *   stringEncoding: DBStringEncodingTypes,
 	 *   recordsCountForAdditionInReallocation:number,
 	 *   minimizeBytesToBoolFields:boolean,
+	 *   allowSpecialDataViewTypes:boolean,
 	 *   arrayBuffer?:ArrayBuffer
 	 *   currentRecords?:number
 	 *   levelSize?:number,
@@ -466,6 +480,7 @@ class DB_filling{
 		this.#stringEncoding=objectSettings.stringEncoding;
 		this.#recordsCountForAdditionInReallocation=objectSettings.recordsCountForAdditionInReallocation||0;
 		this.#minimizeBytesToBoolFields=objectSettings.minimizeBytesToBoolFields;
+		this.#allowSpecialDataViewTypes=objectSettings.allowSpecialDataViewTypes;
 		var modifications=objectSettings.modificationsOnCreateFrom;
 		//Делаем общие вещи для любого из путей сюда (создание || бекап)
 		{
@@ -498,7 +513,7 @@ class DB_filling{
 				field.offset=offset;
 				if(this.#minimizeBytesToBoolFields===false){
 					//Если не указано минимизировать поля с bool типом
-					offset+=getByteSizeFieldByType(field.type);
+					offset+=getByteSizeFieldByType(field.type, this.#allowSpecialDataViewTypes);
 					if(field.isFieldUniqueValues===false){
 						if(this.#arrayFieldsAnyValues===null) this.#arrayFieldsAnyValues=[];
 						this.#arrayFieldsAnyValues.push(field);
@@ -506,7 +521,7 @@ class DB_filling{
 				} else {
 					//Если указано минимизировать поля bool
 					if(field.type!=="Bool"){
-						offset+=getByteSizeFieldByType(field.type);
+						offset+=getByteSizeFieldByType(field.type, this.#allowSpecialDataViewTypes);
 					} else {
 						if(this.#arrayFieldsBoolTypes===null) this.#arrayFieldsBoolTypes=[];
 						this.#arrayFieldsBoolTypes.push(field);
@@ -555,7 +570,7 @@ class DB_filling{
 			this.#arrayBuffer=new ArrayBuffer(this.#allocatedRecords*this.#byteSizeOneRecord, {
 				maxByteLength: this.#byteSizeOneRecord*(this.#allocatedRecords+this.#recordsCountForAdditionInReallocation)
 			});
-			this.#dataView=new DataView(this.#arrayBuffer);
+			this.#dataView=this.#allowSpecialDataViewTypes?new InnerExtendedDataView(this.#arrayBuffer):new DataView(this.#arrayBuffer);
 		}
 		//Установить индекс последнего поля уникальных значений
 		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
@@ -573,7 +588,7 @@ class DB_filling{
 			//В случае, если это бекап
 			//Делаем общие вещи
 			this.#currentRecords=objectSettings.currentRecords;
-			var dataViewOnAnotherBuffer=new DataView(objectSettings.arrayBuffer);
+			var dataViewOnAnotherBuffer=this.#allowSpecialDataViewTypes?new InnerExtendedDataView(objectSettings.arrayBuffer):new DataView(objectSettings.arrayBuffer);
 			var oldByteSizeOneRecord=objectSettings.byteSizeOneRecord;
 			/** @type {oldDataStorageForGetter} */
 			var oldData={
@@ -780,7 +795,7 @@ class DB_filling{
 			});
 			this.#replaceDataBufferByBuffer(this.#arrayBuffer, oldBuffer)
 		}
-		this.#dataView=new DataView(this.#arrayBuffer);
+		this.#dataView=this.#allowSpecialDataViewTypes?new InnerExtendedDataView(this.#arrayBuffer):new DataView(this.#arrayBuffer);
 		return this.#allocatedRecords+=countRecords;
 	}
 	/**
@@ -794,7 +809,7 @@ class DB_filling{
 		for(var i=0, max=Math.min(this.#arrayFields.length, values.length); i<max; ++i){
 			var value=values[i];
 			var field=this.#arrayFields[i];
-			var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#vadidateValue(field, value));
+			var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#validateValue(field, value));
 			if(checking!=="success") throw Error("[addRecordByArgs] "+checking);
 		}
 		//adding values
@@ -821,7 +836,7 @@ class DB_filling{
 			var value=objectData[stringPropName];
 			var field=this.#objectFields[stringPropName];
 			if(field){
-				var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#vadidateValue(field, value));
+				var checking=this.#checkValueToPutInFieldWithUnique(this.#currentRecords, field, this.#validateValue(field, value));
 				if(checking!=="success") throw Error("[addRecordByObject] "+checking);
 			}
 		}
@@ -921,6 +936,7 @@ class DB_filling{
 	 *   numberOutRange:DBSettingNumberToRange
 	 *   littleEndian:boolean,
 	 *   minimizeBytesToBoolFields:boolean
+	 *   allowSpecialDataViewTypes:boolean
 	 *   levelSize:number
 	 * }} ObjectDBInfo
 	 */
@@ -941,6 +957,7 @@ class DB_filling{
 			numberOutRange:this.#numberOutRange,
 			littleEndian:this.#littleEndian,
 			minimizeBytesToBoolFields:this.#minimizeBytesToBoolFields,
+			allowSpecialDataViewTypes:this.#allowSpecialDataViewTypes,
 			levelSize:this.#countBytesForPointerInBufferOfValues
 		}
 	}
@@ -1037,7 +1054,7 @@ class DB_filling{
 		checking=this.#checkStringIsFieldName(fieldName);
 		if(checking!=="success") throw Error("[setDataOfRecordInField] "+checking);
 		var field=this.#objectFields[fieldName];
-		value=this.#vadidateValue(field, value);
+		value=this.#validateValue(field, value);
 		checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, value);
 		if(checking!=="success") throw Error("[setDataOfRecordInField] "+checking);
 		this.#setValue(indexRecord, field, value);
@@ -1056,13 +1073,13 @@ class DB_filling{
 			//Проверяем все поля указанные в объекте на валидность
 			var field=this.#objectFields[stringPropName];
 			if(field){
-				var checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, this.#vadidateValue(field, objectData[stringPropName]));
+				var checking=this.#checkValueToPutInFieldWithUnique(indexRecord, field, this.#validateValue(field, objectData[stringPropName]));
 				if(checking!=="success") throw Error("[setDataOfRecordByObject] "+checking);
 			}
 		}
 		for(var stringPropName of keys){
 			var field=this.#objectFields[stringPropName];
-			if(field) this.#setValue(indexRecord, field, this.#vadidateValue(field, objectData[stringPropName]));
+			if(field) this.#setValue(indexRecord, field, this.#validateValue(field, objectData[stringPropName]));
 		}
 	}
 	/**
@@ -1321,7 +1338,7 @@ class DB_filling{
 		for(var i=0, max=Math.min(values.length, this.#arrayFields.length); i<max; ++i){
 			var value=values[i];
 			var field=this.#arrayFields[i];
-			this.#setValue(this.#currentRecords, field, this.#vadidateValue(field, value));
+			this.#setValue(this.#currentRecords, field, this.#validateValue(field, value));
 		}
 		for(i; i<this.#arrayFields.length; ++i){
 			var field=this.#arrayFields[i];
@@ -1339,7 +1356,7 @@ class DB_filling{
 		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
 			var field=this.#arrayFields[i];
 			var fieldName=this.#arrayFields[i].name;
-			var value=Object.hasOwn(objectData, fieldName)? this.#vadidateValue(field, objectData[fieldName]): this.#objectFieldNameToDefaultValue[field.name];
+			var value=Object.hasOwn(objectData, fieldName)? this.#validateValue(field, objectData[fieldName]): this.#objectFieldNameToDefaultValue[field.name];
 			this.#setValue(this.#currentRecords, field, value)
 		}
 		this.#currentRecords+=1;
@@ -1384,6 +1401,9 @@ class DB_filling{
 				break;
 			case "Uint16":
 				var value=this.#dataView.getUint16(offset, this.#littleEndian);
+				break;
+			case "Uint24":
+				var value=this.#dataView.getUint24(offset, this.#littleEndian);
 				break;
 			case "Uint32":
 				var value=this.#dataView.getUint32(offset, this.#littleEndian);
@@ -1495,6 +1515,9 @@ class DB_filling{
 				break;
 			case "Uint16":
 				this.#dataView.setUint16(offset, value, littleEndian);
+				break;
+			case "Uint24":
+				this.#dataView.setUint24(offset, value, littleEndian);
 				break;
 			case "Uint32":
 				this.#dataView.setUint32(offset, value, littleEndian);
@@ -1717,7 +1740,7 @@ class DB_filling{
 	 * @param {DBField} field 
 	 * @param {JStypesToDBValue} value 
 	 */
-	#vadidateValue(field, value){
+	#validateValue(field, value){
 		var result=value;
 		if(this.#numberOutRange==="toRange"){
 			switch(field.type){
@@ -1728,6 +1751,10 @@ class DB_filling{
 				case "Uint16":
 					if(value<0) result=0;
 					if(value>65535) result=65535;
+					break;
+				case "Uint16":
+					if(value<0) result=0;
+					if(value>16777215) result=16777215;
 					break;
 				case "Uint32":
 					if(value<0) result=0;
@@ -1828,6 +1855,9 @@ class DB_filling{
 				break;
 			case "Uint16":
 				var value=dataViewOnOldBuffer.getUint16(offset, this.#littleEndian);
+				break;
+			case "Uint24":
+				var value=dataViewOnOldBuffer.getUint24(offset, this.#littleEndian);
 				break;
 			case "Uint32":
 				var value=dataViewOnOldBuffer.getUint32(offset, this.#littleEndian);
@@ -1939,9 +1969,15 @@ class DBCursorToFieldByIndex{
  * Вернет int байт по типу  
  * Если такого типа нет, выбросит ошибку
  * @param {DBValueTypes} type
+ * @param {boolean} allowSpecialDataViewTypes 
  */
-function getByteSizeFieldByType(type){
+function getByteSizeFieldByType(type, allowSpecialDataViewTypes){
 	var byteSize=0;
+	switch(type){
+		case "Uint24":
+			if(allowSpecialDataViewTypes===false) throw Error(`Type ${type} no valid`);
+			break;
+	}
 	switch(type){
 		case "Uint8":
 		case "Int8":
@@ -1951,6 +1987,9 @@ function getByteSizeFieldByType(type){
 		case "Uint16":
 		case "Int16":
 			byteSize=2;
+			break;
+		case "Uint24":
+			byteSize=3;
 			break;
 		case "Uint32":
 		case "Int32":
@@ -2027,6 +2066,7 @@ function checkValueToPutInField(field, value, numberOutRange){
 			case "String":
 				break;
 			case "Uint8":
+			case "Uint24":
 			case "Uint16":
 			case "Uint32":
 			case "Int8":
@@ -2053,6 +2093,10 @@ function checkValueToPutInField(field, value, numberOutRange){
 				case "Uint16":
 					if(value<0) result=`value ${value} less than 0 (limit of Uint16)`;
 					if(value>65535) result=`value ${value} more than 65535 (limit of Uint16)`;
+					break;
+				case "Uint24":
+					if(value<0) result=`value ${value} less than 0 (limit of Uint24)`;
+					if(value>16777215) result=`value ${value} more than 16_777_215 (limit of Uint24)`;
 					break;
 				case "Uint32":
 					if(value<0) result=`value ${value} less than 0 (limit of Uint32)`;
@@ -2180,7 +2224,7 @@ function getDefaultValueFromFieldDescription(field){
 	return value;
 }
 /**
- * No working. No use
+ * Расширенный объект DataView с парой методов для специфичных типов
  */
 class InnerExtendedDataView extends DataView {
 	/**
@@ -2188,7 +2232,7 @@ class InnerExtendedDataView extends DataView {
 	 * @param {number} value 
 	 * @param {boolean} [littleEndian] 
 	 */
-	getUint24(offset, value, littleEndian){
+	getUint24(offset, littleEndian){
 		var result=0;
 		if(littleEndian){
 			result=this.getUint8(offset)+this.getUint8(offset+1)*256+this.getUint8(offset+2)*65536;
@@ -2204,11 +2248,13 @@ class InnerExtendedDataView extends DataView {
 	 */
 	setUint24(offset, value, littleEndian){
 		if(littleEndian){
-			var num=Math.floor(value/256);
-			this.setUint8(offset, value%256);
-			this.setUint8(offset+1, num);
-			this.setUint8(offset+2, );
+			this.setUint8(offset, value&255);
+			this.setUint8(offset+1, (value>>>8)&255);
+			this.setUint8(offset+2, (value>>>16)&255);
 		} else {
+			this.setUint8(offset, (value>>>16)&255);
+			this.setUint8(offset+1, (value>>>8)&255);
+			this.setUint8(offset+2, value&255);
 		}
 	}
 }
@@ -2220,7 +2266,7 @@ class InnerExtendedDataView extends DataView {
  * @param {JStypesToDBValue} [defaultValue] 
  */
 function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(type)){
-	var checking=getByteSizeFieldByType(type);
+	var checking=getByteSizeFieldByType(type, true);
 	/** @type {DBField} */
 	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:typeof defaultValue==="boolean"?(defaultValue?"true":""):defaultValue?.toString(), to: typeof defaultValue}};
 	if(defaultValue!=undefined){

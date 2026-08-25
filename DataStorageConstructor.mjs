@@ -75,6 +75,7 @@ function getTypeDBFromNumberCode(code){
 	}
 	return type;
 }
+var mapStorageToCallbackAllocation=new WeakMap();
 /**
  * Эта функция будет вызываться когда число записей станет равно числу выделенных записей  
  * Рекомендуется в эту функцию добавить вызов метода на выделение памяти
@@ -152,7 +153,6 @@ var DataStorage={
 		/** @type {ObjectDBInfo} */
 		var object=JSON.parse(jsoninfo);
 		var objectFields={};
-		var indexLastFieldUniqueValues=-1;
 		if(objectSettings.modifications){
 			if(objectSettings.modifications.addFields){
 				if(!Array.isArray(objectSettings.modifications.addFields)) throw Error("[DataStorage][createFrom][modifications] optional property 'addFields' must be array of objects");
@@ -176,6 +176,7 @@ var DataStorage={
 				if(!Array.isArray(objectSettings.modifications.deleteRecords)) throw Error("[DataStorage][createFrom][modifications] optional property 'deleteRecords' must be array of positive integers")
 			}
 		}
+		var indexLastFieldUniqueValues=-1;
 		for(var i=0; i<object.fields.length; ++i){
 			var field=object.fields[i];
 			objectFields[field.name]=field;
@@ -199,6 +200,50 @@ var DataStorage={
 			arrayBuffer:buffer,
 			levelSize:object.levelSize,
 			modificationsOnCreateFrom:objectSettings.modifications
+		})
+	},
+	/**
+	 * Сделать копию Хранилища  
+	 * При неуказанном втором аргументе, хранилище будет создано с callbackAllocation тем же, указанном в копируемом  
+	 * Хранилища ничем не будут связаны друг с другом
+	 * @param {DB_filling} storageObject 
+	 * @param {CallbackAllocation} [callbackAllocation] 
+	 * @returns 
+	 */
+	copy(storageObject, callbackAllocation){
+		var funcToCallbackAllocation=null;
+		if(callbackAllocation!=null){
+			if (typeof callbackAllocation!=="function") throw Error("[DataStorage][copy] callbackAllocation must be function");
+			funcToCallbackAllocation=callbackAllocation;
+		} else {
+			funcToCallbackAllocation=mapStorageToCallbackAllocation.get(storageObject)
+		}
+		var object=storageObject.getInfo();
+		var objectFields={};
+		var buffer=storageObject.getBuffer();
+		var indexLastFieldUniqueValues=-1;
+		for(var i=0; i<object.fields.length; ++i){
+			var field=object.fields[i];
+			objectFields[field.name]=field;
+			if(field.isFieldUniqueValues){
+				indexLastFieldUniqueValues=i;
+			}
+		}
+		return new DB_filling({
+			currentRecords:object.currentRecords,
+			allocatedRecords:object.allocatedRecords,
+			byteSizeOneRecord:object.byteSizeOneRecord,
+			indexLastFieldUniqueValues:indexLastFieldUniqueValues,
+			callbackAllocation:funcToCallbackAllocation,
+			arrayFields:object.fields,
+			objectFields:objectFields,
+			stringEncoding:object.stringEncoding,
+			numberOutRange:object.numberOutRange,
+			littleEndian:object.littleEndian,
+			recordsCountForAdditionInReallocation:object.recordsCountForAdditionInReallocation,
+			minimizeBytesToBoolFields:object.minimizeBytesToBoolFields,
+			arrayBuffer:buffer,
+			levelSize:object.levelSize,
 		})
 	}
 }
@@ -407,6 +452,7 @@ class DB_filling{
 	*/
 	/** @param {DBFillingObjectSettings} objectSettings */
 	constructor(objectSettings){
+		mapStorageToCallbackAllocation.set(this, objectSettings.callbackAllocation)
 		//Получаем общие данные
 		//Эти данные ОБЯЗАТЕЛЬНЫ К ПЕРЕДАЧЕ
 		this.#allocatedRecords=objectSettings.allocatedRecords;
@@ -1813,7 +1859,6 @@ class DB_filling{
 							if(!this.#mapNoNumberValueToCountUses.has(defaultValue)){
 								this.#setCacheRecordAboutValue(defaultValue);
 								this.#mapNoNumberValueToCountUses.set(defaultValue, Infinity);
-							} else {
 							}
 					}
 					break;

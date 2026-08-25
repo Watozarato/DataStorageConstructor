@@ -512,24 +512,8 @@ class DB_filling{
 		}
 		if(!objectSettings.arrayBuffer){
 			//Если создаем хранилище, а не делаем бекап
-			for(var i=0, maxI=this.#arrayFieldsAnyValues.length; (i<maxI); ++i){
-				var field=this.#arrayFieldsAnyValues[i];
-				var defaultValueOfField=getDefaultValueFromFieldDescription(field);
-				if(this.#objectFieldNameToDefaultValue===null) this.#objectFieldNameToDefaultValue={};
-				this.#objectFieldNameToDefaultValue[field.name]=defaultValueOfField;
-				switch(field.type){
-					case "Dynamic":
-					case "String":
-						switch(typeof defaultValueOfField){
-							case "string":
-								if(!this.#mapNoNumberValueToCountUses.has(defaultValueOfField)){
-									this.#setCacheRecordAboutValue(defaultValueOfField);
-									this.#mapNoNumberValueToCountUses.set(defaultValueOfField, Infinity);
-								}
-						}
-						break;
-				}
-			}
+			//Установить дефолт.значения
+			this.#setDefaultValuesToCache();
 		} else {
 			//В случае, если это бекап
 			//Делаем общие вещи
@@ -589,19 +573,7 @@ class DB_filling{
 				}
 			}
 			//Установить дефолт.значения
-			//Указать "использование" в бесконечность для каждого, чтобы его не мог удалить сборщик
-			for(var field of this.#arrayFieldsAnyValues){
-				var defaultValue=getDefaultValueFromFieldDescription(field);
-				switch(typeof defaultValue){
-					case "string":
-						if(this.#mapNoNumberValueToPointer.has(defaultValue)){
-							this.#mapNoNumberValueToCountUses.set(defaultValue, Infinity);
-						} else {
-							this.#setCacheRecordAboutValue(defaultValue);
-						}
-						break;
-				}
-			}
+			this.#setDefaultValuesToCache();
 			if(!modifications){
 				//Если никаких модификаций не было
 				this.#replaceDataBufferByBuffer(this.#arrayBuffer, objectSettings.arrayBuffer, this.#currentRecords*this.#byteSizeOneRecord);
@@ -1823,6 +1795,30 @@ class DB_filling{
 				break;
 		}
 		return value;
+	}
+	/**
+	 * Устанавливает дефолт.значения полей, также делает их неудаляемыми сборщиком
+	 */
+	#setDefaultValuesToCache(){
+		for(var i=0, maxI=this.#arrayFieldsAnyValues.length; (i<maxI); ++i){
+			var field=this.#arrayFieldsAnyValues[i];
+			var defaultValue=getDefaultValueFromFieldDescription(field);
+			if(this.#objectFieldNameToDefaultValue===null) this.#objectFieldNameToDefaultValue={};
+			this.#objectFieldNameToDefaultValue[field.name]=defaultValue;
+			switch(field.type){
+				case "Dynamic":
+				case "String":
+					switch(typeof defaultValue){
+						case "string":
+							if(!this.#mapNoNumberValueToCountUses.has(defaultValue)){
+								this.#setCacheRecordAboutValue(defaultValue);
+								this.#mapNoNumberValueToCountUses.set(defaultValue, Infinity);
+							} else {
+							}
+					}
+					break;
+			}
+		}
 	}
 }
 /**

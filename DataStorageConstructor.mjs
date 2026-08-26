@@ -258,6 +258,20 @@ var DataStorage={
 			arrayBuffer:buffer,
 			levelSize:object.levelSize,
 		})
+	},
+	/**
+	 * Создает ArrayBuffer на основе строки
+	 * @param {string} string 
+	 * @returns {ArrayBuffer}
+	 */
+	getBufferFromString(string){
+		var view=new Uint8Array(string.length);
+		var i=0;
+		for(var char of string){
+			view[i]=char.charCodeAt(0);
+			i+=1;
+		}
+		return view.buffer;
 	}
 }
 class DB_creating{
@@ -620,11 +634,12 @@ class DB_filling{
 						//Получить тип значения
 						var type=dataViewOnAnotherBuffer.getUint8(i);
 						i+=1;
+						//Length значения
+						var length=dataViewOnAnotherBuffer.getUint32(i, littleEndian);
+						i+=4;
 						//Получить значение по его типу
 						switch(type){
 							case getNumberCodeFromTypeDB("String"):
-								var length=dataViewOnAnotherBuffer.getUint32(i, littleEndian);
-								i+=4;
 								var value="";
 								if(this.#stringEncoding==="UTF-16"){
 									if(length===0) value="";
@@ -1040,6 +1055,15 @@ class DB_filling{
 		} else {
 			var result=this.#arrayBuffer.slice();
 		}
+		return result;
+	}
+	/**
+	 * Возвращает строку из символов, каждый из которых будет байтом буффера
+	 * @returns {string}
+	 */
+	getStringFromBuffer(){
+		var result="";
+		for(var byte of new Uint8Array(this.getBuffer())) result+=String.fromCharCode(byte);
 		return result;
 	}
 	/**
@@ -2269,7 +2293,7 @@ function createFieldAnyValues(name, type, defaultValue=getDefaultValueByType(typ
 	var checking=getByteSizeFieldByType(type, true);
 	/** @type {DBField} */
 	var objectField={name, type, isFieldUniqueValues:false, defaultValue:{value:typeof defaultValue==="boolean"?(defaultValue?"true":""):defaultValue?.toString(), to: typeof defaultValue}};
-	if(defaultValue!=undefined){
+	if(defaultValue!=null){
 		var checking=checkFieldTypeForValueType(objectField, defaultValue);
 		if(checking!=="success") throw Error(checking);
 	} else {

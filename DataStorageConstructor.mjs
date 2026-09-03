@@ -1,5 +1,18 @@
+/*
+	Schema Buffer:
+	fields,
+	specificValues:[
+		{
+			pointer: 2 | 4 | 8 байт,
+			type of value: 1 байт,
+			length of value (гарантируйте что length - кол-во байт): 1-4 byte
+			value: number байт]
+		}
+	]
+	Порядок свойств гарантируйте
+*/
 /**
- * @typedef {"UTF-16"} DBStringEncodingTypes
+ * @typedef {"UTF-8" |"UTF-16"} DBStringEncodingTypes
  * @typedef {"Uint8" | "Uint16" | "Uint32" | "Int8" | "Int16" | "Int32" | "Float32" | "Float64"} DBNumberTypes
  * @typedef {"Uint24"} DBStrangeDataViewTypes
  * @typedef {"BigInt64" | "BigUint64"} DBBigIntTypes
@@ -267,9 +280,8 @@ var DataStorage={
 	getBufferFromString(string){
 		var view=new Uint8Array(string.length);
 		var i=0;
-		for(var char of string){
-			view[i]=char.charCodeAt(0);
-			i+=1;
+		for(var i=0, max=string.length; i<max; ++i){
+			view[i]=string.charCodeAt(i);
 		}
 		return view.buffer;
 	}
@@ -318,20 +330,20 @@ class DB_creating{
 					case "toRange":
 						this.#numberOutRange=objectSettings.numberOutRange;
 						break;
-					default: throw Error("param 'numberOutRange' setting can be only strings: 'error' or 'toRange'");
+					default: throw Error("[DataStorage][create] param 'numberOutRange' setting can be only strings: 'error' or 'toRange'");
 				}
 			}
 			if(Object.hasOwn(objectSettings, "stringEncoding")){
 				switch(objectSettings.stringEncoding){
-					//case "UTF-8":
+					case "UTF-8":
 					case "UTF-16":
 						this.#stringEncoding=objectSettings.stringEncoding;
 						break;
-					default: throw Error("param 'stringEncoding' setting can be only strings: 'UTF-16'");
+					default: throw Error("[DataStorage][create] param 'stringEncoding' setting can be only strings: 'UTF-16'");
 				}
 			}
 			if(Object.hasOwn(objectSettings, "recordsCountForAdditionInReallocation")){
-				if(!checkValueIsPositiveInteger(objectSettings.recordsCountForAdditionInReallocation)) throw Error("param 'recordsCountForAdditionInReallocation' must be positive integer");
+				if(!checkValueIsPositiveInteger(objectSettings.recordsCountForAdditionInReallocation)) throw Error("[DataStorage][create] param 'recordsCountForAdditionInReallocation' must be positive integer");
 				this.#recordsCountForAdditionInReallocation=objectSettings.recordsCountForAdditionInReallocation;
 			}
 		}
@@ -441,7 +453,7 @@ class DB_filling{
 	/** @type {Record<string, JStypesToDBValue>} */
 	#objectFieldNameToDefaultValue=null;
 	/** @type {Record<string,Map<JStypesToDBValue, Set<number>>>}} */
-	#cacheFieldsAnyValues={};
+	#cacheFieldsAnyValues=null;
 	/** 
 	 * Структура вида:  
 	 * {
@@ -615,6 +627,7 @@ class DB_filling{
 				var oldByteSizeOneRecord=objectSettings.byteSizeOneRecord;
 				var littleEndian=this.#littleEndian;
 				if((checkFieldsForHaveThemFieldWithSpecificType(this.#arrayFields))){
+					var objectForUTF8={code:0, length:0};
 					for(var i=oldByteSizeOneRecord*this.#allocatedRecords, maxI=dataViewOnAnotherBuffer.byteLength; i<maxI;){
 						//Получить значение указателя
 						switch(objectSettings.levelSize){
@@ -635,21 +648,29 @@ class DB_filling{
 						var type=dataViewOnAnotherBuffer.getUint8(i);
 						i+=1;
 						//Length значения
-						var length=dataViewOnAnotherBuffer.getUint32(i, littleEndian);
-						i+=4;
+						var objectForUTF8=getUTF8valueInfo(dataViewOnAnotherBuffer, i, objectForUTF8);
+						var length=objectForUTF8.code;
+						i+=objectForUTF8.length;
 						//Получить значение по его типу
 						switch(type){
 							case getNumberCodeFromTypeDB("String"):
 								var value="";
-								if(this.#stringEncoding==="UTF-16"){
-									if(length===0) value="";
-									else {
+								switch(this.#stringEncoding){
+									case "UTF-8":
+										var lengthValue=i+length;
+										for(i, lengthValue; i<lengthValue; ){
+											objectForUTF8=getUTF8valueInfo(dataViewOnAnotherBuffer, i, objectForUTF8);
+											value+=String.fromCodePoint(objectForUTF8.code);
+											i+=objectForUTF8.length;
+										}
+										break;
+									case "UTF-16":
 										var lengthValue=i+length;
 										for(i, lengthValue; i<lengthValue; ){
 											value+=String.fromCharCode(dataViewOnAnotherBuffer.getUint16(i, littleEndian));
 											i+=2;
 										}
-									}
+										break;
 								}
 								break;
 						}
@@ -976,6 +997,9 @@ class DB_filling{
 			levelSize:this.#countBytesForPointerInBufferOfValues
 		}
 	}
+	getInfoInJSON(){
+		return JSON.stringify(this.getInfo());
+	}
 	/**
 	 * Возвращает число - длину байт буффера  
 	 * Аргумент принимает одну из строк:
@@ -990,18 +1014,27 @@ class DB_filling{
 		if(!typeCalculation || typeCalculation==="basebuffer"){
 			result=this.#arrayBuffer.byteLength;
 		} else if(typeCalculation==="alldata"){
-			/*
-				Пожалуйста помни схему:
-				[pointer: 2 | 4 | 8 байт][type of value: 1 байт][length of value: 4 байта][? content: number байт]
-			*/
+			//Схема в начале файла
 			result=this.#arrayBuffer.byteLength;
 			if(this.#mapPointerToNoNumberValue){
 				var byteLengthPointers=this.#mapPointerToNoNumberValue.size*this.#countBytesForPointerInBufferOfValues;
-				var byteLengthLengthValue=this.#mapPointerToNoNumberValue.size*4;
+				var byteLengthLengthValue=0;
 				var byteLengthTypeValue=this.#mapPointerToNoNumberValue.size*1;
 				var byteLengthValueData=0;
 				for(var value of this.#mapPointerToNoNumberValue.values()){
-					if(typeof value==="string") byteLengthValueData+=value.length*2;
+					if(typeof value==="string"){
+						switch(this.#stringEncoding){
+							case "UTF-8":
+								var lengthOfStringInUTF8=getLengthForStringInUTF8(value);
+								byteLengthLengthValue+=getUTF8valueLength(lengthOfStringInUTF8);
+								byteLengthValueData+=lengthOfStringInUTF8;
+								break;
+							case "UTF-16":
+								byteLengthLengthValue+=(getUTF8valueLength(value.length));
+								byteLengthValueData+=value.length*2;
+								break;
+						}
+					}
 				}
 				var addBytes=(byteLengthPointers+byteLengthTypeValue+byteLengthLengthValue+byteLengthValueData);
 				result+=addBytes;
@@ -1021,6 +1054,7 @@ class DB_filling{
 			this.#replaceDataBufferByBuffer(result, this.#arrayBuffer);
 			var offset=this.#arrayBuffer.byteLength;
 			var littleEndian=this.#littleEndian;
+			var objectForUTF8={length:0};
 			for(var pointer of this.#mapPointerToNoNumberValue.keys()){
 				var value=this.#mapPointerToNoNumberValue.get(pointer);
 				switch(this.#countBytesForPointerInBufferOfValues){
@@ -1040,16 +1074,28 @@ class DB_filling{
 				if(typeof value==="string"){
 					dataview.setUint8(offset, getNumberCodeFromTypeDB("String"), littleEndian);
 					offset+=1;
-					dataview.setUint32(offset, value.length*2, littleEndian);
-					offset+=4;
-					var localoffset=0;
-					if(this.#stringEncoding==="UTF-16"){
-						for(var i=0; i<value.length; ++i){
-							dataview.setUint16(offset+localoffset, value.charCodeAt(i), littleEndian)
-							localoffset+=2;
-						}
+					switch(this.#stringEncoding){
+						case "UTF-8":
+							//length data
+							objectForUTF8=setUTF8value(dataview, offset, getLengthForStringInUTF8(value), objectForUTF8);
+							offset+=objectForUTF8.length;
+							//put value
+							for(var codePoint of value){
+								setUTF8value(dataview, offset, codePoint.codePointAt(0), objectForUTF8);
+								offset+=objectForUTF8.length;
+							}
+							break;
+						case "UTF-16":
+							//length data
+							objectForUTF8=setUTF8value(dataview, offset, value.length*2, objectForUTF8);
+							offset+=objectForUTF8.length;
+							//put value
+							for(var i=0; i<value.length; ++i){
+								dataview.setUint16(offset, value.charCodeAt(i), littleEndian);
+								offset+=2;
+							}
+							break;
 					}
-					offset+=localoffset;
 				}
 			}
 		} else {
@@ -1063,7 +1109,8 @@ class DB_filling{
 	 */
 	getStringFromBuffer(){
 		var result="";
-		for(var byte of new Uint8Array(this.getBuffer())) result+=String.fromCharCode(byte);
+		var strconstruct=String;
+		for(var byte of new Uint8Array(this.getBuffer())) result+=strconstruct.fromCharCode(byte);
 		return result;
 	}
 	/**
@@ -1776,9 +1823,9 @@ class DB_filling{
 					if(value<0) result=0;
 					if(value>65535) result=65535;
 					break;
-				case "Uint16":
+				case "Uint24":
 					if(value<0) result=0;
-					if(value>16777215) result=16777215;
+					if(value>16_777_215) result=16777215;
 					break;
 				case "Uint32":
 					if(value<0) result=0;
@@ -2057,6 +2104,7 @@ function checkFieldTypeForValueType(field, value){
 			break;
 		case "Uint8":
 		case "Uint16":
+		case "Uint24":
 		case "Uint32":
 		case "Int8":
 		case "Int16":
@@ -2188,6 +2236,7 @@ function getDefaultValueByType(type){
 		case "Dynamic":
 		case "Uint8":
 		case "Uint16":
+		case "Uint24":
 		case "Uint32":
 		case "Int8":
 		case "Int16":
@@ -2246,6 +2295,101 @@ function getDefaultValueFromFieldDescription(field){
 			break;
 	}
 	return value;
+}
+/**
+ * @typedef {Object} UTF8ValueObjectInformation
+ * @property {number} code
+ * @property {number} length длина в байтах кода
+ */
+/**
+ * Получить информацию о значении (значение и его длина) закодированном в DataView по UTF-8
+ * @param {DataView} dataview 
+ * @param {number} offset 
+ * @param {UTF8ValueObjectInformation} [objectResult] 
+ * @returns {UTF8ValueObjectInformation}
+ */
+function getUTF8valueInfo(dataview, offset, objectResult={code:NaN, length:0}){
+	var byteDesc=dataview.getUint8(offset);
+	if((byteDesc>>7)===0){
+		objectResult.code=byteDesc;
+		objectResult.length=1;
+	} else if((byteDesc>>5)===0b110){
+		objectResult.code=((byteDesc & 0b00011111) << 6) | (dataview.getUint8(offset+1) & 0b00111111);
+		objectResult.length=2;
+	} else if((byteDesc>>4)===0b1110){
+		objectResult.code=(
+			((byteDesc & 0b00001111) << 12) |
+			((dataview.getUint8(offset+1) & 0b00111111) << 6) |
+			(dataview.getUint8(offset+2) & 0b00111111)
+		);
+		objectResult.length=3;
+	} else if((byteDesc>>3)===0b11110){
+		objectResult.code=(
+			((byteDesc & 0b00000111) << 18) |
+			((dataview.getUint8(offset+1) & 0b00111111) << 12) |
+			((dataview.getUint8(offset+2) & 0b00111111) << 6) |
+			(dataview.getUint8(offset+3) & 0b00111111)
+		);
+		objectResult.length=4;
+	}
+	return objectResult;
+}
+/**
+ * Получить кол-во байт для значения в кодировке UTF-8
+ * @param {number} code 
+ * @returns 
+ */
+function getUTF8valueLength(code){
+	var length=0;
+	if((code>>7)===0){
+		length=1;
+	} else if((code>>11)===0){
+		length=2;
+	} else if((code>>16)===0){
+		length=3;
+	} else if((code>>21)===0){
+		length=4;
+	}
+	return length;
+}
+/**
+ * Вернуть кол-во байт для кодировки строки в UTF-8
+ * @param {string} string 
+ * @returns 
+ */
+function getLengthForStringInUTF8(string){
+	var length=0;
+	for(var codePoint of string) length+=getUTF8valueLength(codePoint.codePointAt(0));
+	return length;
+}
+/**
+ * Задать байты в DataView под кодировку значения в UTF-8
+ * @param {DataView} dataview 
+ * @param {number} offset 
+ * @param {number} code 
+ * @param {{length:number}} [objectResult]
+ */
+function setUTF8value(dataview, offset, code, objectResult={length:0}){
+	if((code>>7)===0){
+		dataview.setUint8(offset, code);
+		objectResult.length=1;
+	} else if((code>>11)===0){
+		dataview.setUint8(offset, 0b11000000 | (code>>6));
+		dataview.setUint8(offset+1, 0b10000000 | (code & 0b111111));
+		objectResult.length=2;
+	} else if((code>>16)===0){
+		dataview.setUint8(offset, 0b11100000 | (code>>12));
+		dataview.setUint8(offset+1, 0b10000000 | ((code>>6) & 0b111111));
+		dataview.setUint8(offset+2, 0b10000000 | (code & 0b111111));
+		objectResult.length=3;
+	} else if((code>>21)===0){
+		dataview.setUint8(offset, 0b11110000 | (code>>18));
+		dataview.setUint8(offset+1, 0b10000000 | ((code>>12) & 0b111111));
+		dataview.setUint8(offset+2, 0b10000000 | ((code>>6) & 0b111111));
+		dataview.setUint8(offset+3, 0b10000000 | (code & 0b111111));
+		objectResult.length=4;
+	}
+	return objectResult;
 }
 /**
  * Расширенный объект DataView с парой методов для специфичных типов

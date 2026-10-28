@@ -1,11 +1,11 @@
 /*
-	Терминология:
-	Reference Cleaner - аналог Garbage Collector, но строго удаление лишних pointers (данные не удаляются)
-	Лишним pointer считается, когда в Хранилище нет ни поля ни структуры ведущей к данному, связанным с этим pointer
+	Терминология внутренняя для этого файла:
+	Pointer - Number, по которому ищутся данные в Хранилище для данных отличающихся от чисел
 
 	"Ссылочным" тип называется, если его будут хранить по pointer
 
 	Specific Type/Value - тип/значение, который будет храниться в Хранилище как "ссылочный"
+	Также может называться как Reference Type.
 
 	Special Type - тип, который является не стандартным (например Uint24)
 */
@@ -19,7 +19,7 @@
 			//Опционально в конце может быть несколько байт под Bool поля
 		}
 	]
-	//Часть не относящаяся к данным полей (сохраненные по pointers структуры) - Буффер значений
+	//Часть не относящаяся к данным полей (сохраненные по pointers структуры) - Буффер данных
 	data:[
 		//Запись
 		//Правило: length - кол-во байт на все значения данного, указывается в UTF-8 формате (экономим байты)
@@ -62,6 +62,8 @@
 */
 /** Максимум полей в хранилище */
 var maxFieldsCountInStorage=512;
+var maxPropsInObjectDynamicStructure=128;
+var maxValuesInArrayForDataStorage=128;
 /**
  * Проверить: есть ли ключ в самом объекте
  * @param {Object} object 
@@ -229,6 +231,12 @@ function getTypeDBFromNumberCode(code){
  */
 var mapStorageToCallbackAllocation=new WeakMap();
 /**
+ * Коллекция Хранилищ и заданных для них #getBuffer
+ * Используется для copy метода в DataStorage
+ * @type {WeakMap<DB_filling, CallbackAllocation>}
+ */
+var mapStorageToMethodForGetBuffer=new WeakMap();
+/**
  * Данный Symbol используется для modifications addFields в итераторах - верните как значение его в итераторе, чтобы в поле записи было установлено дефолт.значение
  * @type {Symbol}
  */
@@ -329,7 +337,7 @@ var DataStorage={
 					if(!field) throw Error("[DataStorage][createFrom][modifications][addFields] 'field' must be DBField");
 					if(typeof field.isFieldUniqueValues!=="boolean") throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'isFieldUniqueValues' must be boolean");
 					if(typeof field.name!=="string") throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'name' must be string type");
-					if(getByteSizeFieldByType(field.type, object.allowSpecialDataViewTypes)===0) throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'type' no valid");
+					if(getByteSizeOfFieldType(field.type, object.allowSpecialDataViewTypes)===0) throw Error("[DataStorage][createFrom][modifications][addFields] property of field 'type' no valid");
 					if(!field.isFieldUniqueValues){
 						if(checkFieldTypeForValueType(field, getDefaultValueFromFieldDescription(field))!=="success") throw Error("[DataStorage][createFrom] defaultValue no compare with type field");
 					}
@@ -389,7 +397,7 @@ var DataStorage={
 		}
 		var object=storageObject.getInfo();
 		var objectFields={};
-		var buffer=storageObject.getBuffer();
+		var buffer=mapStorageToMethodForGetBuffer.get(storageObject).call(storageObject);
 		var indexLastFieldUniqueValues=-1;
 		for(var i=0; i<object.fields.length; ++i){
 			var field=object.fields[i];
@@ -448,6 +456,7 @@ class DB_creating{
 	#stringEncoding="UTF-16";
 	#minimizeBytesToBoolFields=false;
 	#allowSpecialDataViewTypes=false;
+	#startStringInError="[DataStorage][create]";
 	/**
 	 * @typedef {{
 	 *   littleEndian?:boolean,
@@ -474,7 +483,7 @@ class DB_creating{
 					case "toRange":
 						this.#numberOutRange=objectSettings.numberOutRange;
 						break;
-					default: throw Error("[DataStorage][create] param 'numberOutRange' setting can be only strings: 'error' or 'toRange'");
+					default: throw Error(this.#startStringInError+" param 'numberOutRange' setting can be only strings: 'error' or 'toRange'");
 				}
 			}
 			if(checkObjectHasSelfProperty(objectSettings, "stringEncoding")){
@@ -483,11 +492,11 @@ class DB_creating{
 					case "UTF-16":
 						this.#stringEncoding=objectSettings.stringEncoding;
 						break;
-					default: throw Error("[DataStorage][create] param 'stringEncoding' setting can be only strings: 'UTF-8' | 'UTF-16'");
+					default: throw Error(this.#startStringInError+" param 'stringEncoding' setting can be only strings: 'UTF-8' | 'UTF-16'");
 				}
 			}
 			if(checkObjectHasSelfProperty(objectSettings, "recordsCountForAdditionInReallocation")){
-				if(!checkValueIsPositiveInteger(objectSettings.recordsCountForAdditionInReallocation)) throw Error("[DataStorage][create] param 'recordsCountForAdditionInReallocation' must be positive integer");
+				if(!checkValueIsPositiveInteger(objectSettings.recordsCountForAdditionInReallocation)) throw Error(this.#startStringInError+" param 'recordsCountForAdditionInReallocation' must be positive integer");
 				this.#recordsCountForAdditionInReallocation=objectSettings.recordsCountForAdditionInReallocation;
 			}
 		}
@@ -498,8 +507,9 @@ class DB_creating{
 	 * @param {DBValueTypes} type 
 	 */
 	addFieldUniqueValues(name, type){
-		var byteSize=getByteSizeFieldByType(type, this.#allowSpecialDataViewTypes);
-		if(checkObjectHasSelfProperty(this.#objectFields,name)) throw Error(`[addFieldUniqueValues] Field ${name} already has in DB`);
+		var checking=this.#checkInfoBeforeAddField(name, type);
+		if(checking!=="success") throw Error(this.#startStringInError+"[addFieldUniqueValues] "+checking);
+		var byteSize=getByteSizeOfFieldType(type, this.#allowSpecialDataViewTypes);
 		var objectField={name, type, offset:this.#offset, isFieldUniqueValues:true};
 		this.#arrayFields.push(objectField);
 		this.#objectFields[name]=objectField;
@@ -514,9 +524,9 @@ class DB_creating{
 	 * @param {JStypesToDBValue} [defaultValue]
 	 */
 	addFieldAnyValues(name, type, defaultValue){
-		var byteSize=getByteSizeFieldByType(type, this.#allowSpecialDataViewTypes);
-		if(byteSize===0) throw Error("Type no valid");
-		if(checkObjectHasSelfProperty(this.#objectFields,name)) throw Error(`[addFieldAnyValues] Field ${name} already has in DB`);
+		var checking=this.#checkInfoBeforeAddField(name, type);
+		if(checking!=="success") throw Error(this.#startStringInError+"[addFieldAnyValues] "+checking);
+		var byteSize=getByteSizeOfFieldType(type, this.#allowSpecialDataViewTypes);
 		/** @type {DBField} */
 		var objectField=createFieldAnyValues(name, type, defaultValue);
 		objectField.offset=this.#offset;
@@ -527,11 +537,24 @@ class DB_creating{
 		return this;
 	}
 	/**
+	 * Служебный метод для проверки поля перед его вставкой (здесь собрана общая логика)
+	 * @param {string} name 
+	 * @param {DBValueTypes} type 
+	 * @returns {"success" | string}
+	 */
+	#checkInfoBeforeAddField(name, type){
+		var result="success";
+		if(getByteSizeOfFieldType(type, this.#allowSpecialDataViewTypes)===0) result=("Type no valid");
+		if(checkObjectHasSelfProperty(this.#objectFields,name)) result=(`Field ${name} already has in DB`);
+		if((this.#arrayFields.length+1)>maxFieldsCountInStorage) result=(`Storage cant store more then ${maxFieldsCountInStorage} fields`);
+		return result;
+	}
+	/**
 	 * Устанавливает функцию, которая будет вызываться, когда число записей будет равно числу записей на которые выделена память  
 	 * В функции this будет равен объекту Хранилища для работы с данными, для удобства работы
 	 * @param {CallbackAllocation} func */
 	setCallbackAllocation(func){
-		if(typeof func!=="function") throw Error("CallbackAllocation must be function");
+		if(typeof func!=="function") throw Error(this.#startStringInError+"[setCallbackAllocation] CallbackAllocation must be function");
 		this.#callbackAllocation=func;
 		return this;
 	}
@@ -540,8 +563,7 @@ class DB_creating{
 	 * Обязательно установите callbackAllocation (через метод setCallbackAllocation)
 	 */
 	endCreation(){
-		if(typeof this.#callbackAllocation!=="function") throw Error("[endCreation] CallbackAllocation must be setted");
-		if(this.#arrayFields.length>maxFieldsCountInStorage) throw Error(`Storage cant store more then ${maxFieldsCountInStorage} fields`);
+		if(typeof this.#callbackAllocation!=="function") throw Error(this.#startStringInError+"[endCreation] CallbackAllocation must be setted");
 		return new DB_filling({
 			allocatedRecords:this.#allocatedRecords,
 			byteSizeOneRecord:this.#offset,
@@ -630,16 +652,19 @@ class DB_filling{
 	/** 
 	 * @typedef {Object} OperationsForSpecificValuesInStorage
 	 * @property {function} setCacheRecord
+	 * @property {function} createArrayForStorage
 	 */
 	/** @type {OperationsForSpecificValuesInStorage} */
 	#objectCacheOperations={
-		/**
-		 * @this {DB_filling}
-		 */
+		/** @this {DB_filling} */
 		setCacheRecord:function(value){
 			this.#setCacheRecordAboutValue(value);
 			this.#callReferenceCleanerIfManyValues();
-		}
+		},
+		/** @this {DB_filling} */
+		createArrayForStorage:(function(array){
+			return this.#createArrayForStorage(array);
+		}).bind(this)
 	};
 	/**
 	 * Сюда вы можете указать свойства с данными, которые не нужно удалять  
@@ -654,7 +679,7 @@ class DB_filling{
 			},
 			/** @this {DB_filling} */
 			onCreation(){
-				this.#header=this.createObjectDynamicStructure();
+				this.#header=this.#createObjectDynamicStructure();
 				this.#setCacheRecordAboutValue(this.#header, 1);
 			},
 			/** @this {DB_filling} */
@@ -686,6 +711,7 @@ class DB_filling{
 	constructor(objectSettings){
 		//Добавьте новое хранилище в коллекцию и передайте туда установленный кол-бек
 		mapStorageToCallbackAllocation.set(this, objectSettings.callbackAllocation);
+		mapStorageToMethodForGetBuffer.set(this, this.#getBuffer);
 		//Получаем общие данные
 		//Эти данные ОБЯЗАТЕЛЬНЫ К ПЕРЕДАЧЕ
 		this.#allocatedRecords=objectSettings.allocatedRecords;
@@ -722,6 +748,7 @@ class DB_filling{
 						arrayNewFields.push(field);
 					}
 				}
+				//Так сделали, чтобы копии данных сделать (изоляция от внешних)
 				this.#arrayFields=JSON.parse(JSON.stringify(arrayNewFields));
 				this.#objectFields=createObjectOfFields(this.#arrayFields);
 			}
@@ -732,11 +759,11 @@ class DB_filling{
 				field.offset=offset;
 				if(this.#minimizeBytesToBoolFields===false){
 					//Если не указано минимизировать поля с bool типом
-					offset+=getByteSizeFieldByType(field.type, this.#allowSpecialDataViewTypes);
+					offset+=getByteSizeOfFieldType(field.type, this.#allowSpecialDataViewTypes);
 				} else {
 					//Если указано минимизировать поля bool
 					if(field.type!=="Bool"){
-						offset+=getByteSizeFieldByType(field.type, this.#allowSpecialDataViewTypes);
+						offset+=getByteSizeOfFieldType(field.type, this.#allowSpecialDataViewTypes);
 					} else {
 						if(this.#arrayFieldsBoolTypes===null) this.#arrayFieldsBoolTypes=[];
 						this.#arrayFieldsBoolTypes.push(field);
@@ -793,7 +820,6 @@ class DB_filling{
 		this.#objectForAddRecordByArgs=new Array(this.#arrayFields.length);
 		if(!objectSettings.arrayBuffer){
 			//Если создаем хранилище, а не делаем бекап
-			//Установить дефолт.значения
 			for(var value of this.#arrayFuncsForSpecialPropsStorage){
 				value.onCreation.call(this);
 			}
@@ -873,7 +899,7 @@ class DB_filling{
 							var length=objectForUTF8.code;
 							i+=objectForUTF8.length;
 							i+=length;
-							this.#setCacheRecordAboutValue(this.createObjectDynamicStructure(), pointer);
+							this.#setCacheRecordAboutValue(this.#createObjectDynamicStructure(), pointer);
 							break;
 						case getNumberCodeFromTypeDB("Array"):
 							//Length значения
@@ -881,7 +907,7 @@ class DB_filling{
 							var length=objectForUTF8.code;
 							i+=objectForUTF8.length;
 							i+=length;
-							this.#setCacheRecordAboutValue(this.createArrayForStorage(), pointer);
+							this.#setCacheRecordAboutValue(this.#createArrayForStorage(), pointer);
 							break;
 						default: throw Error("Unknown type "+codeTypeOfValue);
 					}
@@ -898,6 +924,7 @@ class DB_filling{
 					i+=objectSettings.levelSize;
 					//Получить значение по его типу
 					switch(codeTypeOfValue){
+						//В случае строки - просто сместиться (создали ее в первом этапе)
 						case getNumberCodeFromTypeDB("String"):
 							//Length значения
 							getUTF8valueInfo(dataViewOnOldBuffer, i, objectForUTF8);
@@ -1053,7 +1080,7 @@ class DB_filling{
 						}
 					}
 				}
-				this.#callReferenceCleaner();
+				this.#callPointersValidate();
 			}
 		}
 		if(this.#allocatedRecords===0) this.#callbackAllocation.call(this, this.#currentRecords);
@@ -1098,7 +1125,7 @@ class DB_filling{
 			copyValues[i]=getDefaultValueFromFieldDescription(this.#arrayFields[i]);
 		}
 		//Проверить все значения
-		for(var i=0, max=copyValues.length; i<max; ++i){
+		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
 			var field=this.#arrayFields[i];
 			//Валидация значения (до проверок)
 			copyValues[i]=this.#validateValue(field, copyValues[i])
@@ -1147,10 +1174,27 @@ class DB_filling{
 		return this;
 	}
 	/**
+	 * Возвращает объект-указатель, методы которого обращены к конкретному полю конкретной записи  
+	 * Выгоден при частых обращениях к одному и тому же полю конкретной записи
+	 * @param {number} indexRecord 
+	 * @param {string} fieldName 
+	 * @returns {DBCursorToFieldByIndex}
+	 */
+	createCursor(indexRecord, fieldName){
+		var checking=this.#checkIndexRecordValidate(indexRecord);
+		if(checking!=="success") throw Error("[createCursor] "+checking);
+		var checking=this.#checkStringIsFieldName(fieldName);
+		if(checking!=="success") throw Error("[createCursor] "+checking);
+		return new DBCursorToFieldByIndex(this, indexRecord, this.#objectFields[fieldName], this.#getValue, this.#setValue, this.#checkValueToPutInFieldWithUnique);
+	}
+	/**
 	 * Создать объект динамической структуры
 	 * @param {ObjectDBRecord} [object] 
 	 */
 	createObjectDynamicStructure(object){
+		return this.#createObjectDynamicStructure(object);
+	}
+	#createObjectDynamicStructure(object){
 		return new ObjectDynamicStructure(this, this.#objectCacheOperations, object);
 	}
 	/**
@@ -1158,6 +1202,9 @@ class DB_filling{
 	 * @param {JStypesToDBValue[]} [array] 
 	 */
 	createArrayForStorage(array){
+		return this.#createArrayForStorage(array);
+	}
+	#createArrayForStorage(array){
 		return new ArrayForDataStorage(this, this.#objectCacheOperations, array);
 	}
 	/**
@@ -1250,6 +1297,7 @@ class DB_filling{
 	 *   allocatedRecords:number,
 	 *   byteSizeOneRecord:number,
 	 *   usedMemoryForBaseBuffer:number,
+	 *   usedMemoryForAllData:number,
 	 *   fields:ArrayDBFields,
 	 *   stringEncoding:DBStringEncodingTypes,
 	 *   numberOutRange:DBSettingNumberToRange
@@ -1257,19 +1305,31 @@ class DB_filling{
 	 *   minimizeBytesToBoolFields:boolean
 	 *   allowSpecialDataViewTypes:boolean
 	 *   levelSize:number
-	 * }} ObjectDBInfo
+	 * }} ObjectDataStorageInfo
 	 */
 	/**
 	 * Получить объект с некоторыми данными Хранилища по типу: максимум записей, на сколько записей выделена память и тд  
 	 * Метод необходим при сохранении данных Хранилища в файлы, так как через данные из этого метода буффер можно восстановить
-	 * @returns {ObjectDBInfo}
+	 * @returns {ObjectDataStorageInfo}
 	 */
 	getInfo(){
+		return this.#getInfo();
+	}
+	getInfoInJSON(){
+		return JSON.stringify(this.#getInfo());
+	}
+	/**
+	 * Возвращает при каждом вызове новый объект
+	 * @returns {ObjectDataStorageInfo}
+	 */
+	#getInfo(){
+		var bytesAll=this.#getCountBytesForAllData();
 		return {
 			currentRecords:this.#currentRecords,
 			allocatedRecords:this.#allocatedRecords,
 			byteSizeOneRecord:this.#byteSizeOneRecord,
-			usedMemoryForBaseBuffer:this.getByteLength("basebuffer"),
+			usedMemoryForBaseBuffer:this.#arrayBuffer.byteLength,
+			usedMemoryForAllData:bytesAll,
 			fields:this.#arrayFields.map(elem=>({...elem})),
 			stringEncoding:this.#stringEncoding,
 			numberOutRange:this.#numberOutRange,
@@ -1279,60 +1339,21 @@ class DB_filling{
 			levelSize:this.#countBytesForPointerInBufferOfValues
 		}
 	}
-	getInfoInJSON(){
-		return JSON.stringify(this.getInfo());
-	}
 	/**
 	 * Возвращает число - длину байт буффера  
 	 * Аргумент принимает одну из строк:
-	 * * "alldata" - буффер + длина всех кешируемых данных (вызывает очистку ссылок)  
+	 * * "bufferall" - буффер + длина всех кешируемых данных (вызывает очистку ссылок)  
 	 * * "bufferbase" - длину основного буфера (не идет подсчет длины кешированных данных)  
 	 * * "record" - кол-во байт на запись  
 	 * 
-	 * По умолчанию - basebuffer
-	 * @param {"alldata" | "bufferbase" | "record"} [typeCalculation]
+	 * По умолчанию - bufferbase
+	 * @param {"bufferall" | "bufferbase" | "record"} [typeCalculation]
 	 */
 	getByteLength(typeCalculation){
 		var result=0;
 		switch(typeCalculation){
-			case "alldata":
-				//Вызвать очистку ссылок
-				this.#callReferenceCleaner();
-				//Схема в начале файла
-				result=this.#arrayBuffer.byteLength;
-				if(this.#mapPointerToNoNumberValue){
-					var byteLengthPointers=this.#mapPointerToNoNumberValue.size*this.#countBytesForPointerInBufferOfValues;
-					var byteLengthLengthValue=0;
-					var byteLengthTypeValue=this.#mapPointerToNoNumberValue.size*1;
-					var byteLengthValueData=0;
-					for(var value of this.#mapPointerToNoNumberValue.values()){
-						switch(typeof value){
-							case "string":
-								switch(this.#stringEncoding){
-									case "UTF-8":
-										var lengthOfStringInUTF8=getLengthForStringInUTF8(value);
-										byteLengthLengthValue+=getUTF8valueLength(lengthOfStringInUTF8);
-										byteLengthValueData+=lengthOfStringInUTF8;
-										break;
-									case "UTF-16":
-										byteLengthLengthValue+=(getUTF8valueLength(value.length*2));
-										byteLengthValueData+=value.length*2;
-										break;
-								}
-								break;
-							case "object":
-								if(value!==null){
-									var lengthObject=this.#getByteLengthOfObject(value);
-									var bytesLength=getUTF8valueLength(lengthObject)
-									byteLengthLengthValue+=bytesLength;
-									byteLengthValueData+=lengthObject;
-								}
-								break;
-						}
-					}
-					var addBytes=(byteLengthPointers+byteLengthTypeValue+byteLengthLengthValue+byteLengthValueData);
-					result+=addBytes;
-				}
+			case "bufferall":
+				result=this.#getCountBytesForAllData();
 				break;
 			case "record":
 				result=this.#byteSizeOneRecord;
@@ -1344,14 +1365,64 @@ class DB_filling{
 		}
 		return result;
 	}
+	#getCountBytesForAllData(){
+		//Вызвать очистку ссылок
+		this.#callPointersValidate();
+		//Схема в начале файла
+		var result=this.#arrayBuffer.byteLength;
+		if(this.#mapPointerToNoNumberValue){
+			var byteLengthPointers=this.#mapPointerToNoNumberValue.size*this.#countBytesForPointerInBufferOfValues;
+			var byteLengthLengthValue=0;
+			var byteLengthTypeValue=this.#mapPointerToNoNumberValue.size*1;
+			var byteLengthValueData=0;
+			for(var value of this.#mapPointerToNoNumberValue.values()){
+				switch(typeof value){
+					case "string":
+						switch(this.#stringEncoding){
+							case "UTF-8":
+								var lengthOfStringInUTF8=getLengthForStringInUTF8(value);
+								byteLengthLengthValue+=getUTF8valueLength(lengthOfStringInUTF8);
+								byteLengthValueData+=lengthOfStringInUTF8;
+								break;
+							case "UTF-16":
+								byteLengthLengthValue+=(getUTF8valueLength(value.length*2));
+								byteLengthValueData+=value.length*2;
+								break;
+						}
+						break;
+					case "object":
+						if(value!==null){
+							var lengthObject=this.#getByteLengthOfObject(value);
+							var bytesLength=getUTF8valueLength(lengthObject)
+							byteLengthLengthValue+=bytesLength;
+							byteLengthValueData+=lengthObject;
+						}
+						break;
+				}
+			}
+			var addBytes=(byteLengthPointers+byteLengthTypeValue+byteLengthLengthValue+byteLengthValueData);
+			result+=addBytes;
+		}
+		return result;
+	}
 	/**
 	 * Возвращает копию буффера со всеми данными  
 	 * Используйте для сохранения данных в файлы
 	 * @returns {ArrayBuffer}
 	 */
 	getBuffer(){
+		return this.#getBuffer();
+	}
+	/**
+	 * Возвращает копию буффера со всеми данными  
+	 * Используйте для сохранения данных в файлы  
+	 * 
+	 * Метод приватный, чтобы не изменяли извне
+	 * @returns {ArrayBuffer}
+	 */
+	#getBuffer(){
 		if(this.#mapPointerToNoNumberValue){
-			var result=new ArrayBuffer(this.getByteLength("alldata"));
+			var result=new ArrayBuffer(this.#getCountBytesForAllData());
 			var dataview=new DataView(result);
 			this.#replaceDataBufferByBuffer(result, this.#arrayBuffer);
 			var offset=this.#arrayBuffer.byteLength;
@@ -1435,7 +1506,7 @@ class DB_filling{
 		return result;
 	}
 	/**
-	 * Возвращает строку из символов, каждый из которых будет байтом буффера
+	 * Возвращает строку из codePoint, каждый из которых будет байтом буффера
 	 * @returns {string}
 	 */
 	getStringFromBuffer(){
@@ -1464,7 +1535,18 @@ class DB_filling{
 	}
 	/**
 	 * Задать данные в записи по ее индексу  
-	 * Передайте в аргумент объект, в котором ключ - имя поля, значение - данные
+	 * Передайте в аргумент объект, в котором ключ - имя поля, значение - данные  
+	 * @example
+	 * var myStorage=new DataStorage()
+	 *   .addFieldUniqueValues("id", "Float64")
+	 *   .addFieldAnyValues("money", "Uint32")
+	 *   .setCallbackAllocation(function(){
+	 *       this.allocateMemoryForRecords(100);
+	 *   })
+	 *   .endCreation();
+	 * myStorage.addRecordByArgs(-1234567890, 0);
+	 * myStorage.setRecordDataByObject(0, {money: 1500});
+	 * //Запись 0 будет иметь данные: {id: -1234567890, money: 1500}
 	 * @param {number} indexRecord 
 	 * @param {ObjectDBRecord} objectData 
 	 */
@@ -1501,6 +1583,12 @@ class DB_filling{
 		if(!checkValueIsPositiveInteger(count)) throw Error("[setRecordsCountForAdditionInReallocation] arg 'count' must be positive integer");
 		this.#recordsCountForAdditionInReallocation=count;
 	}
+	/** 
+	 * Этот Set-объект используется для методов, ищущих indexRecord (или indexesRecord)  
+	 * Если создаете новый метод и используете этот объект, то не забудьте его очистить перед манипуляциями
+	 * @type {Set<number>}
+	 */
+	#setForMethodsFindIndexRecord=new Set();
 	/**
 	 * Найти индекс записи в Хранилище у которой данные полей равны данным из объекта
 	 * @param {ObjectDBRecord} objectData 
@@ -1537,15 +1625,15 @@ class DB_filling{
 				var field=this.#objectFields[stringPropName];
 				if(field && (!field.isFieldUniqueValues)){
 					var value=objectData[stringPropName];
-					var equalWith=this.#getValue(result, field);
-					if(value!==equalWith) return -1;
+					var valueWhatWithNeedEqual=this.#getValue(result, field);
+					if(value!==valueWhatWithNeedEqual) return -1;
 				}
 			}
 			return this.#checkIndexInRange(result, indexFrom, indexTo)?result:-1;
 		} else {
 			//В случае, если не найдено полей уникальных значений
-			/** @type {Set<number>} */
-			var set=new Set();
+			this.#setForMethodsFindIndexRecord.clear();
+			var set=this.#setForMethodsFindIndexRecord;//new Set();
 			var gettedFirst=false;
 			var keys=Object.keys(objectData);
 			for(var stringPropName of keys){
@@ -1619,8 +1707,9 @@ class DB_filling{
 			else return [];
 		} else {
 			//В случае, если не найдено полей уникальных значений
+			this.#setForMethodsFindIndexRecord.clear();
 			/** @type {Set<number>} */
-			var set=new Set();
+			var set=this.#setForMethodsFindIndexRecord;//new Set();
 			var gettedFirst=false;
 			for(var stringPropName of keys){
 				var field=this.#objectFields[stringPropName];
@@ -1728,26 +1817,12 @@ class DB_filling{
 		return result;
 	}
 	/**
-	 * Возвращает объект-указатель, методы которого обращены к конкретному полю конкретной записи  
-	 * Выгоден при частых обращениях к одним и тем же данным в поле конкретной записи
-	 * @param {number} indexRecord 
-	 * @param {string} fieldName 
-	 * @returns {DBCursorToFieldByIndex}
-	 */
-	createCursor(indexRecord, fieldName){
-		var checking=this.#checkIndexRecordValidate(indexRecord);
-		if(checking!=="success") throw Error("[createCursor] "+checking);
-		var checking=this.#checkStringIsFieldName(fieldName);
-		if(checking!=="success") throw Error("[createCursor] "+checking);
-		return new DBCursorToFieldByIndex(this, indexRecord, this.#objectFields[fieldName], this.#getValue, this.#setValue, this.#checkValueToPutInFieldWithUnique);
-	}
-	/**
 	 * Добавляет запись и данные  
 	 * Вызывает очистку ссылок **только после** установки всех значений в хранилище
 	 * @param  {...JStypesToDBValue} values 
 	 */
 	#addRecordByArgs(...values){
-		for(var i=0, max=values.length; i<max; ++i){
+		for(var i=0, max=this.#arrayFields.length; i<max; ++i){
 			var value=values[i];
 			var field=this.#arrayFields[i];
 			this.#setValue(this.#currentRecords, field, value, false);
@@ -2038,9 +2113,13 @@ class DB_filling{
 		this.#mapNoNumberValueToPointer.delete(value);
 		this.#mapPointerToNoNumberValue.delete(pointer);
 	}
+	/**
+	 * Вызывает валидатор указателей, при их большом количестве
+	 * Также вызывает увеличитель кол-во байт под указатели
+	 */
 	#callReferenceCleanerIfManyValues(){
 		if(this.#mapPointerToNoNumberValue.size>this.#countRecordsForGrowPointerByteSize){
-			this.#callReferenceCleaner();
+			this.#callPointersValidate();
 			this.#selectLevelSizeOfCacheRecordToBuffer();
 		}
 	}
@@ -2061,8 +2140,9 @@ class DB_filling{
 	}
 	/**
 	 * Удалить все ссылки на данные, на которые ни одна запись не ссылается (вложенные объекты)  
+	 * Также создает указатели на значения внутри структур (которые есть в полях хранилища) 
 	 */
-	#callReferenceCleaner(){
+	#callPointersValidate(){
 		var setSpecificValuesThatStorageHas=new Set();
 		setSpecificValuesThatStorageHas.add(null);
 		//Пройдитесь по специальным полям в хранилище
@@ -2113,6 +2193,7 @@ class DB_filling{
 								this.#addValuesFromStructureToSetStorageOwnObjects(setForCollect, valueFromValuesStructure);
 								break;
 						}
+						this.#selectLevelSizeOfCacheRecordToBuffer();
 					}
 					break;
 				case(ArrayForDataStorage):
@@ -2127,6 +2208,7 @@ class DB_filling{
 								this.#addValuesFromStructureToSetStorageOwnObjects(setForCollect, valueFromValuesStructure);
 								break;
 						}
+						this.#selectLevelSizeOfCacheRecordToBuffer();
 					}
 					break;
 			}
@@ -2267,6 +2349,7 @@ class DB_filling{
 	#isInt32(number){
 		var result=true;
 		if(typeof number!=="number") result=false;
+		if(Object.is(number, -0)) result=false;
 		if(number>SettingsOfNumericTypesDB.Int32.max) result=false;
 		if(number<SettingsOfNumericTypesDB.Int32.min) result=false;
 		if(!Number.isInteger(number)) result=false;
@@ -2683,6 +2766,7 @@ class ObjectDynamicStructure {
 		if(typeof object==="object"){
 			//Проверка значений
 			var keys=Object.keys(object);
+			if(keys.length>maxPropsInObjectDynamicStructure) throw Error(`ObjectDynamicStructure cant have more than ${maxPropsInObjectDynamicStructure} properties`);
 			for(var key of keys){
 				var checking=canValueBeInObject(this.#belongTo, object[key]);
 				if(checking!=="success") throw Error(checking);
@@ -2704,15 +2788,8 @@ class ObjectDynamicStructure {
 		if(typeof key!=="string") throw Error(`key in ObjectDynamicStructure must be string, getted: ${key} [type: ${typeof key}]`);
 		var checking=canValueBeInObject(this.#belongTo, value);
 		if(checking!=="success") throw Error(checking);
+		if((!this.#data.has(key)) && (this.#data.size>=maxPropsInObjectDynamicStructure)) throw Error(`ObjectDynamicStructure cant have more than ${maxPropsInObjectDynamicStructure} properties`);
 		this.#data.set(key, value);
-		//Добавьте в кеш хранилища ключ и значение 
-		this.#objectForCacheOperations.setCacheRecord.call(this.#belongTo, key);
-		switch(typeof value){
-			case "string":
-			case "object":
-				this.#objectForCacheOperations.setCacheRecord.call(this.#belongTo, value);
-				break;
-		}
 	}
 	/**
 	 * @param {string} key 
@@ -2755,6 +2832,7 @@ class ArrayForDataStorage {
 		this.#belongTo=belongTo;
 		this.#objectForCacheOperations=objectForCacheOperations;
 		if(Array.isArray(startValues)){
+			if(startValues.length>=maxValuesInArrayForDataStorage) throw Error();
 			//Проверьте все значения
 			for(var value of startValues){
 				var checking=canValueBeInObject(this.#belongTo, value);
@@ -2776,13 +2854,8 @@ class ArrayForDataStorage {
 	addElementToEnd(element){
 		var checking=canValueBeInObject(this.#belongTo, element);
 		if(checking!=="success") throw Error(checking);
+		if(this.#data.length>=maxValuesInArrayForDataStorage) throw Error();
 		this.#data.push(element);
-		switch(typeof element){
-			case "string":
-			case "object":
-				this.#objectForCacheOperations.setCacheRecord.call(this.#belongTo, element);
-				break;
-		}
 	}
 	removeElementsFromEnd(count){
 		if((this.#data.length-count)>=0) this.#data.length-=count;
@@ -2800,12 +2873,6 @@ class ArrayForDataStorage {
 		var checking=canValueBeInObject(this.#belongTo, element);
 		if(checking!=="success") throw Error(checking);
 		if(index<this.#data.length){
-			switch(typeof element){
-				case "string":
-				case "object":
-					this.#objectForCacheOperations.setCacheRecord.call(this.#belongTo, element);
-					break;
-			}
 			this.#data[index]=element;
 		}
 	}
@@ -2833,11 +2900,11 @@ class ArrayForDataStorage {
 			//Установить значение в новый массив
 			newArray[i]=newValue;
 		}
-		return this.#belongTo.createArrayForStorage(newArray);
+		return this.#objectForCacheOperations.createArrayForStorage(newArray);
 	}
 	filter(func){
 		var newArray=this.#data.filter(func);
-		return this.#belongTo.createArrayForStorage(newArray);
+		return this.#objectForCacheOperations.createArrayForStorage(newArray);
 	}
 	values(){
 		return this.#data.values();
@@ -2887,11 +2954,11 @@ function canValueBeInObject(storage, value, object){
 }
 /**
  * Вернет int байт по типу  
- * Если такого типа нет, выбросит ошибку
+ * Считайте, что если вернется 0, то это невалидный тип
  * @param {DBValueTypes} type
  * @param {boolean} allowSpecialDataViewTypes 
  */
-function getByteSizeFieldByType(type, allowSpecialDataViewTypes){
+function getByteSizeOfFieldType(type, allowSpecialDataViewTypes){
 	var byteSize=0;
 	if(SpecialTypes.includes(type)){
 		if(allowSpecialDataViewTypes===false) throw Error(`Type ${type} no valid`);
@@ -2910,7 +2977,6 @@ function getByteSizeFieldByType(type, allowSpecialDataViewTypes){
 			case "Dynamic":
 				byteSize=9;
 				break;
-			default: throw Error(`Type ${type} no valid`);
 		}
 	}
 	return byteSize;
@@ -3267,7 +3333,7 @@ function getValueFromDescriptionValue(descriptionValue){
  */
 function createFieldAnyValues(name, type, defaultValue){
 	//Вызываем функцию эту, что проверить: передан валидный тип или нет
-	getByteSizeFieldByType(type, true);
+	getByteSizeOfFieldType(type, true);
 	/** @type {DBField} */
 	var objectField={
 		name, 
